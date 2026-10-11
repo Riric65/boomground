@@ -1,8 +1,12 @@
-//! Débris : les petits cubes qui volent quand on casse un voxel.
+//! Débris : les petits éclats qui volent quand on casse un voxel. Purement
+//! décoratifs (pas de collision avec le joueur), ils disparaissent vite.
 
 use bevy::prelude::*;
 
-use crate::world::{get_component, set_component, VoxelAssets, VoxelWorld};
+use crate::world::{VoxelAssets, VoxelWorld};
+
+/// Nombre maximal de débris simultanés.
+const MAX_DEBRIS: usize = 400;
 
 /// Mini générateur pseudo-aléatoire (xorshift64), sans dépendance externe.
 #[derive(Resource)]
@@ -53,7 +57,6 @@ pub struct Debris {
     pub half: f32,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_debris(
     commands: &mut Commands,
     assets: &VoxelAssets,
@@ -67,20 +70,17 @@ pub fn spawn_debris(
         Debris {
             vel,
             spin: Vec3::new(rng.signed() * 9.0, rng.signed() * 9.0, rng.signed() * 9.0),
-            life: 1.6 + rng.f32() * 1.2,
-            half: scale * 0.5,
+            life: 1.2 + rng.f32() * 1.2,
+            half: scale * crate::world::VOXEL * 0.45 * 0.5,
         },
         Mesh3d(assets.debris_cube.clone()),
-        MeshMaterial3d(assets.materials[mat as usize].clone()),
+        MeshMaterial3d(assets.materials[mat as usize % assets.materials.len()].clone()),
         Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
+        bevy::light::NotShadowCaster,
     ));
 }
 
 /// Gravité, collision avec les voxels, frottements, disparition.
-///
-/// Les débris rebondissent sur la géométrie réelle (pas sur un plan imaginaire)
-/// et perdent vite de l'énergie : ils finissent posés au lieu de rouler
-/// indéfiniment.
 pub fn update_debris(
     time: Res<Time>,
     world: Res<VoxelWorld>,
@@ -88,9 +88,11 @@ pub fn update_debris(
     mut query: Query<(Entity, &mut Transform, &mut Debris)>,
 ) {
     let dt = time.delta_secs().min(0.05);
+    let count = query.iter().len();
+    // Trop de débris : on accélère la disparition des plus vieux.
+    let extra_decay = if count > MAX_DEBRIS { 4.0 } else { 1.0 };
 
     for (entity, mut transform, mut debris) in &mut query {
-        // Gravité + frottement de l'air (légèreResistance).
         debris.vel.y -= 22.0 * dt;
         debris.vel *= 1.0 - (0.6 * dt).min(0.5);
         debris.spin *= 1.0 - (1.2 * dt).min(0.5);
@@ -99,32 +101,22 @@ pub fn update_debris(
         let half = Vec3::splat(debris.half);
         let mut contact = false;
 
-        for axis in 0..3 {
-            let delta = get_component(debris.vel, axis) * dt;
+        for axis in [1, 0, 2] {
+            let delta = debris.vel[axis] * dt;
             if delta == 0.0 {
                 continue;
             }
             if world.sweep(&mut pos, half, axis, delta) {
                 contact = true;
                 if axis == 1 {
-                    // Rebond amorti : un débris ne « bondit » pas comme une
-                    // balle, il ricoche et se pose.
                     debris.vel.y = -debris.vel.y * 0.28;
                     if debris.vel.y.abs() < 0.6 {
                         debris.vel.y = 0.0;
                     }
                 } else {
-                    let v = get_component(debris.vel, axis);
-                    set_component(&mut debris.vel, axis, -v * 0.35);
+                    debris.vel[axis] = -debris.vel[axis] * 0.35;
                 }
             }
-        }
-
-        // Filet de sécurité : très loin sous la carte, on fait tomber le
-        // débris au lieu de le laisser tomber indéfiniment.
-        if pos.y < -12.0 {
-            pos.y = -12.0;
-            debris.vel = Vec3::ZERO;
         }
 
         transform.translation = pos;
@@ -135,16 +127,21 @@ pub fn update_debris(
             debris.spin.z * dt,
         ));
 
-        // Au sol, on freine franchement : un peu de glissement, puis plus
-        // rien du tout (comme un gravier qui s'arrête).
         if contact && debris.vel.y <= 0.0 {
             let friction = 1.0 - (5.5 * dt).min(1.0);
             debris.vel.x *= friction;
             debris.vel.z *= friction;
+            debris.spin *= friction;
         }
 
-        debris.life -= dt;
-        if debris.life <= 0.0 {
+        debris.life -= dt * extra_decay;
+        // Rétrécit pendant sa dernière demi-seconde au lieu de disparaître
+        // d'un coup.
+        if debris.life < 0.5 {
+            let s = transform.scale.x * (1.0 - dt * 4.0).max(0.0);
+            transform.scale = Vec3::splat(s);
+        }
+        if debris.life <= 0.0 || pos.y < -10.0 {
             commands.entity(entity).despawn();
         }
     }

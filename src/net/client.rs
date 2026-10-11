@@ -6,16 +6,14 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 
-use crate::game::{GameState, Weapon};
+use crate::game::{GameState, WeaponId};
 use crate::net::protocol::{read_into, split_address, write_packet, FrameReader, HitKind, Packet};
-use crate::rubble::{self, Chunks};
-use crate::world::{VoxelAssets, VoxelWorld};
+use crate::weapon::{BombAssets, Destroyer};
 
 /// Représentation d'un joueur distant (pour l'afficher).
 #[derive(Component)]
 pub struct RemotePlayer {
     pub id: u16,
-    pub name: String,
 }
 
 #[derive(Resource)]
@@ -24,9 +22,10 @@ pub struct NetClient {
     pub address: String,
     stream: Option<TcpStream>,
     reader: FrameReader,
-    outbox: Vec<Packet>,
+    /// Octets en attente d'envoi (le socket est non bloquant : une trame
+    /// peut partir en plusieurs fois sans être coupée).
+    outbox: Vec<u8>,
     pub id: Option<u16>,
-    pub connected: bool,
     pub status: String,
 }
 
@@ -40,7 +39,6 @@ impl Default for NetClient {
             reader: FrameReader::default(),
             outbox: Vec::new(),
             id: None,
-            connected: false,
             status: String::new(),
         }
     }
@@ -49,6 +47,7 @@ impl Default for NetClient {
 impl NetClient {
     /// Tente de se connecter. Retourne l'adresse réellement visée.
     pub fn connect(&mut self) -> Result<String, String> {
+        self.disconnect();
         let (host, port) = split_address(&self.address);
         if host.is_empty() {
             return Err("adresse vide : saisissez un domaine ou une IP".into());
@@ -67,9 +66,9 @@ impl NetClient {
         // adresses résolues avant d'abandonner.
         let mut last_error: Option<std::io::Error> = None;
         for socket in &addrs {
-            match TcpStream::connect_timeout(socket, Duration::from_secs(5)) {
+            match TcpStream::connect_timeout(socket, Duration::from_secs(3)) {
                 Ok(stream) => {
-                    stream.set_nonblocking(true).ok();
+                    stream.set_nodelay(true).ok();
                     let mut clone = stream.try_clone().map_err(|e| e.to_string())?;
                     write_packet(
                         &mut clone,
@@ -78,8 +77,9 @@ impl NetClient {
                         },
                     )
                     .map_err(|e| e.to_string())?;
+                    stream.set_nonblocking(true).ok();
                     self.stream = Some(stream);
-                    self.connected = true;
+                    self.reader = FrameReader::default();
                     self.status = format!("connecté à {socket}");
                     return Ok(socket.to_string());
                 }
@@ -89,12 +89,21 @@ impl NetClient {
 
         Err(match last_error {
             Some(ref e) if e.kind() == std::io::ErrorKind::ConnectionRefused => format!(
-                "aucun serveur sur {target} — sur la machine qui héberge : \
-                 `cargo run --bin boomground-server`"
+                "aucun serveur sur {target} — sur la machine qui héberge, lancez \
+                 « BoomGround Serveur »"
             ),
             Some(e) => format!("{target} : {e}"),
             None => format!("{target} : aucune adresse joignable"),
         })
+    }
+
+    /// Ferme la connexion (retour au solo).
+    pub fn disconnect(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        self.outbox.clear();
+        self.id = None;
     }
 
     pub fn is_online(&self) -> bool {
@@ -106,49 +115,53 @@ impl NetClient {
         if !self.is_online() {
             return;
         }
-        self.send(packet);
+        self.outbox.extend_from_slice(&packet.encode());
         self.flush();
     }
 
-    fn send(&mut self, packet: Packet) {
-        self.outbox.push(packet);
-    }
-
-    fn flush(&mut self) {
+    /// Envoie les octets en attente (appelé à chaque image).
+    pub fn flush(&mut self) {
         let Some(stream) = self.stream.as_mut() else {
             return;
         };
-        while let Some(packet) = self.outbox.first() {
-            match write_packet(stream, packet) {
-                Ok(()) => {
-                    self.outbox.remove(0);
-                }
+        use std::io::Write;
+        let mut sent = 0;
+        while sent < self.outbox.len() {
+            match stream.write(&self.outbox[sent..]) {
+                Ok(0) => break,
+                Ok(n) => sent += n,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => {
                     self.status = format!("réseau : {e}");
                     self.stream = None;
-                    self.connected = false;
+                    self.outbox.clear();
                     return;
                 }
             }
         }
+        self.outbox.drain(..sent);
     }
 
     fn drain(&mut self) -> Vec<Packet> {
         let Some(stream) = self.stream.as_mut() else {
             return Vec::new();
         };
-        match read_into(stream, &mut self.reader) {
-            Ok(0) => {
-                self.stream = None;
-                self.connected = false;
-                self.status = "déconnecté".into();
-            }
-            Ok(_) => {}
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => {
-                self.status = format!("réseau : {e}");
-                self.stream = None;
-                self.connected = false;
+        // On lit tout ce qui est disponible (l'historique d'une partie peut
+        // faire plusieurs centaines de ko).
+        loop {
+            match read_into(stream, &mut self.reader) {
+                Ok(0) => {
+                    self.stream = None;
+                    self.status = "déconnecté du serveur".into();
+                    break;
+                }
+                Ok(_) => continue,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => {
+                    self.status = format!("réseau : {e}");
+                    self.stream = None;
+                    break;
+                }
             }
         }
 
@@ -162,8 +175,10 @@ impl NetClient {
     }
 }
 
-/// Envoie la position et le regard du joueur local au serveur.
+/// Envoie la position et le regard du joueur local au serveur (20 fois/s).
 pub fn send_state(
+    time: Res<Time>,
+    mut timer: Local<f32>,
     mut net: ResMut<NetClient>,
     game: Res<GameState>,
     players: Query<(&Transform, &crate::player::Body), With<crate::player::Player>>,
@@ -171,100 +186,97 @@ pub fn send_state(
     if !net.is_online() {
         return;
     }
+    net.flush();
+    *timer -= time.delta_secs();
+    if *timer > 0.0 {
+        return;
+    }
+    *timer = 0.05;
     let Ok((transform, body)) = players.single() else {
         return;
     };
-    let weapon = match game.weapon {
-        Weapon::Sledge => 0,
-        Weapon::Glock => 1,
-        Weapon::C4 => 2,
-    };
-    net.send(Packet::State {
+    net.send_raw(Packet::State {
         pos: transform.translation,
         yaw: body.yaw,
         pitch: body.pitch,
-        weapon,
+        weapon: game.weapon.tag(),
     });
-    net.flush();
 }
 
 /// Informe le serveur d'une action d'arme (déjà prédite en local).
-pub fn send_hit(
-    net: &mut NetClient,
-    kind: HitKind,
-    origin: Vec3,
-    dir: Vec3,
-    blast: f32,
-) {
-    if !net.is_online() {
-        return;
-    }
-    net.send(Packet::Hit {
+pub fn send_hit(net: &mut NetClient, kind: HitKind, origin: Vec3, dir: Vec3, blast: f32) {
+    net.send_raw(Packet::Hit {
         kind,
         origin,
         dir,
         blast,
     });
-    net.flush();
 }
 
 /// Applique ce que le serveur a décidé.
 #[allow(clippy::too_many_arguments)]
 pub fn receive(
-    mut commands: Commands,
-    mut net: ResMut<NetClient>,
-    mut world: ResMut<VoxelWorld>,
-    mut chunks: ResMut<Chunks>,
-    assets: Res<VoxelAssets>,
-    c4_assets: Res<crate::weapon::C4Assets>,
-    mut rng: ResMut<crate::debris::Rng>,
+    mut d: Destroyer,
+    bomb_assets: Res<BombAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut remotes: Query<(Entity, &RemotePlayer, &mut Transform), Without<crate::player::Player>>,
+    mut remotes: Query<(Entity, &RemotePlayer, &mut Transform)>,
+    bombs: Query<(Entity, &crate::weapon::Bomb, &Transform), Without<RemotePlayer>>,
 ) {
-    if !net.is_online() {
+    if !d.net.is_online() {
+        // Partie quittée : les joueurs distants disparaissent.
+        for (entity, _, _) in &remotes {
+            d.commands.entity(entity).despawn();
+        }
         return;
     }
 
-    // Un seul appel système par trame reçue.
-    for packet in net.drain() {
+    for packet in d.net.drain() {
         match packet {
-            Packet::Welcome { id } => {
-                net.id = Some(id);
+            Packet::Welcome { id, seed } => {
+                d.net.id = Some(id);
+                // Tout le monde joue sur la carte du serveur.
+                d.game.seed = seed;
+                d.world.rebuild(seed);
             }
-            Packet::Voxels { cells } => {
-                // Autorité du serveur : on applique (idempotent).
+            Packet::Voxels { cells, rubble } => {
+                // Autorité du serveur : on applique (idempotent : un voxel
+                // déjà cassé en local est ignoré).
+                let mut destroyed = Vec::new();
                 for c in cells {
                     let cell = IVec3::new(c[0] as i32, c[1] as i32, c[2] as i32);
-                    if world.is_solid(cell) {
-                        let center = world.cell_center(cell);
-                        let destroyed = world.carve(center, 0.2);
-                        for d in destroyed {
-                            let at = world.cell_center(d);
-                            crate::rubble::break_voxel(
-                                &mut chunks, &mut commands, &assets, &world, d, at, &mut rng,
-                            );
-                        }
+                    if d.world.is_solid(cell) {
+                        d.world.set(cell, false, 0);
+                        destroyed.push(cell);
                     }
+                }
+                if rubble && !destroyed.is_empty() {
+                    let center = destroyed
+                        .iter()
+                        .map(|&c| d.world.cell_center(c))
+                        .sum::<Vec3>()
+                        / destroyed.len() as f32;
+                    crate::rubble::spawn_rubble(
+                        &mut d.rubble,
+                        &mut d.commands,
+                        &d.assets,
+                        &d.world,
+                        &destroyed,
+                        center,
+                        Vec3::ZERO,
+                        &mut d.rng,
+                    );
                 }
             }
             Packet::Player {
-                id,
-                pos,
-                yaw,
-                pitch,
-                ..
+                id, pos, yaw, pitch, ..
             } => {
-                let found = remotes
-                    .iter()
-                    .find(|(_, r, _)| r.id == id)
-                    .map(|(e, _, _)| e);
-                match found {
-                    Some(entity) => {
-                        if let Ok((_, _, mut t)) = remotes.get_mut(entity) {
-                            t.translation = pos + Vec3::Y * 0.85;
-                            t.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
-                        }
+                let rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch * 0.3, 0.0);
+                let at = pos + Vec3::Y * 0.87;
+                match remotes.iter_mut().find(|(_, r, _)| r.id == id) {
+                    Some((_, _, mut t)) => {
+                        t.translation = at;
+                        t.rotation = rotation;
                     }
                     None => {
                         let mesh = meshes.add(Capsule3d::new(0.32, 1.1));
@@ -273,12 +285,11 @@ pub fn receive(
                             perceptual_roughness: 0.8,
                             ..default()
                         });
-                        commands.spawn((
-                            RemotePlayer { id, name: format!("joueur {id}") },
+                        d.commands.spawn((
+                            RemotePlayer { id },
                             Mesh3d(mesh),
                             MeshMaterial3d(mat),
-                            Transform::from_translation(pos + Vec3::Y * 0.85)
-                                .with_rotation(Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0)),
+                            Transform::from_translation(at).with_rotation(rotation),
                         ));
                     }
                 }
@@ -286,34 +297,23 @@ pub fn receive(
             Packet::PlayerLeft { id } => {
                 for (entity, remote, _) in &remotes {
                     if remote.id == id {
-                        commands.entity(entity).despawn();
+                        d.commands.entity(entity).despawn();
                     }
                 }
             }
-            Packet::C4Placed { at } => {
-                crate::weapon::place_c4(&mut commands, at, &c4_assets);
+            Packet::BombPlaced { at, weapon } => {
+                let id = WeaponId::from_tag(weapon);
+                crate::weapon::spawn_placed(&mut d.commands, &bomb_assets, id, at, Quat::IDENTITY, true, false);
             }
             Packet::Explode { at, radius } => {
-                crate::weapon::detonate(at, &mut world, &mut chunks, &mut commands, &assets, &mut rng);
-                let _ = radius;
-            }
-            Packet::Chunks { spawned, removed } => {
-                for c in spawned {
-                    rubble::spawn_from_net(
-                        &mut chunks,
-                        &mut commands,
-                        &assets,
-                        IVec3::new(c.key[0] as i32, c.key[1] as i32, c.key[2] as i32),
-                        Vec3::new(c.at[0], c.at[1], c.at[2]),
-                        c.material,
-                    );
-                }
-                for key in removed {
-                    let key = IVec3::new(key[0] as i32, key[1] as i32, key[2] as i32);
-                    if let Some(state) = chunks.map.remove(&key) {
-                        commands.entity(state.entity).despawn();
+                // La bombe distante disparaît, on voit et on entend
+                // l'explosion ; les voxels arrivent par `Voxels`.
+                for (entity, bomb, t) in &bombs {
+                    if !bomb.local && t.translation.distance(at) < 1.5 {
+                        d.commands.entity(entity).despawn();
                     }
                 }
+                d.effects(at, radius);
             }
             // Paquets destinés au serveur : ignorés côté client.
             Packet::Join { .. } | Packet::State { .. } | Packet::Hit { .. } => {}

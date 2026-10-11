@@ -1,363 +1,342 @@
-//! Gravats : quand on casse un voxel, il ne disparaît pas — il tombe.
+//! Gravats : quand on casse des voxels, ils ne disparaissent pas — ils
+//! tombent sous forme de blocs.
 //!
-//! Les voxels détruits sont regroupés par blocs de `CHUNK` voxels de côté.
-//! Un bloc qui n'existe pas encore est créé, puis **rétrécit** à chaque nouveau
-//! voxel cassé : un bloc peut donc passer de 8 voxels à 1 sans disparaître
-//! brutalement. Les blocs tombent, rebondissent, se cognent entre eux et
-//! dorment une fois posés (ils restent définitivement à leur place).
+//! Les voxels détruits d'un même coup sont regroupés par zones de 2×2×2 ;
+//! chaque zone donne **un** bloc dont la taille est exactement la boîte des
+//! voxels cassés (donc il apparaît dans le vide qu'il vient de créer, et non
+//! plus dans le mur restant). Les blocs tombent, rebondissent, s'empilent,
+//! puis dorment. Ils ne tournent qu'autour de l'axe vertical : leur boîte de
+//! collision correspond donc à ce qu'on voit (avant, des cubes penchés
+//! flottaient au-dessus du sol).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use bevy::prelude::*;
 
 use crate::debris::Rng;
-use crate::world::{VoxelAssets, VoxelWorld, VOXEL};
+use crate::world::{VoxelAssets, VoxelWorld};
 
-/// Un bloc de gravats fait `CHUNK` voxels de côté (2 = 0,8 m).
-pub const CHUNK: i32 = 2;
-/// Nombre maximal de blocs simultanés (sécurité pour les très grosses destructions).
-pub const MAX_CHUNKS: usize = 420;
+/// Une zone de gravats fait `ZONE` voxels de côté (2 = 0,8 m).
+pub const ZONE: i32 = 2;
+/// Nombre maximal de blocs simultanés : au-delà, les plus anciens partent.
+pub const MAX_BLOCKS: usize = 700;
+/// Blocs créés au maximum par destruction (une méga-bombe casse des
+/// dizaines de milliers de voxels).
+const MAX_PER_HIT: usize = 140;
 const GRAVITY: f32 = 22.0;
 /// Grille de collision bloc/bloc.
-const CELL: f32 = 1.2;
+const CELL: f32 = 1.0;
 
 /// Physique d'un bloc.
 #[derive(Component)]
 pub struct Chunk {
     pub vel: Vec3,
-    pub spin: Vec3,
-    /// Demi-taille courante (les blocs ne sont pas tout à fait cubiques).
+    /// Rotation autour de Y (rad/s) pendant le vol.
+    pub spin: f32,
+    /// Demi-taille.
     pub half: Vec3,
     pub sleeping: bool,
-    /// Temps passé à l'arrêt (pour s'endormir).
+    /// Temps passé presque immobile.
     pub rest: f32,
 }
 
-#[derive(Clone, Copy)]
-pub struct ChunkState {
-    pub entity: Entity,
-    /// Sous-voxels encore vivants dans le bloc.
-    pub alive: f32,
-}
-
+/// Blocs vivants, du plus ancien au plus récent.
 #[derive(Resource, Default)]
-pub struct Chunks {
-    /// Blocs connus : clef de zone → état.
-    pub map: HashMap<IVec3, ChunkState>,
+pub struct Rubble {
+    pub order: VecDeque<Entity>,
 }
 
-impl Chunks {
+impl Rubble {
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
     }
 }
 
-/// Coin bas du bloc de gravats contenant cette cellule.
-pub fn chunk_key(cell: IVec3) -> IVec3 {
-    (cell / CHUNK) * CHUNK
-}
-
-/// Un bloc existe tant qu'il reste au moins un voxel dans sa zone.
-/// Règle partagée par le client et le serveur (pas de physique partagée).
-pub fn zone_has_voxels(world: &VoxelWorld, key: IVec3) -> bool {
-    for dx in 0..CHUNK {
-        for dy in 0..CHUNK {
-            for dz in 0..CHUNK {
-                if world.is_solid(key + IVec3::new(dx, dy, dz)) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Centre monde de la zone d'un bloc (pour l'apparition réseau).
-pub fn zone_center(world: &VoxelWorld, key: IVec3) -> Vec3 {
-    let mut min = IVec3::new(i32::MAX, i32::MAX, i32::MAX);
-    let mut max = IVec3::new(i32::MIN, i32::MIN, i32::MIN);
-    for dx in 0..CHUNK {
-        for dy in 0..CHUNK {
-            for dz in 0..CHUNK {
-                let c = key + IVec3::new(dx, dy, dz);
-                min = min.min(c);
-                max = max.max(c);
-            }
-        }
-    }
-    (world.cell_min(min) + world.cell_max(max)) * 0.5
-}
-
-/// Matériau dominant de la zone (pour l'apparition réseau).
-pub fn zone_material(world: &VoxelWorld, key: IVec3) -> u8 {
-    for dx in 0..CHUNK {
-        for dy in 0..CHUNK {
-            for dz in 0..CHUNK {
-                let c = key + IVec3::new(dx, dy, dz);
-                if world.is_solid(c) {
-                    return world.material(c);
-                }
-            }
-        }
-    }
-    0
-}
-
-/// Fait apparaître le bloc décrit par le serveur (et l'enregistre).
-pub fn spawn_from_net(
-    chunks: &mut Chunks,
-    commands: &mut Commands,
-    assets: &VoxelAssets,
-    key: IVec3,
-    at: Vec3,
-    material: u8,
-) {
-    if chunks.map.contains_key(&key) || chunks.map.len() >= MAX_CHUNKS {
-        return;
-    }
-    let size = chunk_size(1.0);
-    let entity = commands
-        .spawn((
-            Chunk {
-                vel: Vec3::ZERO,
-                spin: Vec3::ZERO,
-                half: Vec3::splat(size * 0.5),
-                sleeping: false,
-                rest: 0.0,
-            },
-            Mesh3d(assets.chunk_cube.clone()),
-            MeshMaterial3d(assets.materials[material as usize].clone()),
-            Transform::from_translation(at).with_scale(Vec3::splat(size)),
-        ))
-        .id();
-    chunks.map.insert(key, ChunkState { entity, alive: 1.0 });
-}
-
-/// Taille visuelle d'un bloc selon le nombre de sous-voxels restants.
-fn chunk_size(alive: f32) -> f32 {
-    let total = (CHUNK * CHUNK * CHUNK) as f32;
-    (VOXEL * CHUNK as f32) * (alive / total).powf(1.0 / 3.0)
-}
-
-/// À appeler pour **chaque** voxel détruit : crée ou rétrécit son bloc.
+/// Crée les blocs correspondant aux voxels `destroyed` (déjà vidés).
 #[allow(clippy::too_many_arguments)]
-pub fn break_voxel(
-    chunks: &mut Chunks,
+pub fn spawn_rubble(
+    rubble: &mut Rubble,
     commands: &mut Commands,
     assets: &VoxelAssets,
     world: &VoxelWorld,
-    cell: IVec3,
+    destroyed: &[IVec3],
     impact: Vec3,
+    push: Vec3,
     rng: &mut Rng,
 ) {
-    let key = chunk_key(cell);
+    if destroyed.is_empty() {
+        return;
+    }
+    // Regroupement par zone : boîte englobante + matériau dominant.
+    let mut zones: HashMap<IVec3, (IVec3, IVec3, u8)> = HashMap::new();
+    for &c in destroyed {
+        let key = c.div_euclid(IVec3::splat(ZONE));
+        let m = world.material(c);
+        zones
+            .entry(key)
+            .and_modify(|z| {
+                z.0 = z.0.min(c);
+                z.1 = z.1.max(c);
+            })
+            .or_insert((c, c, m));
+    }
 
-    // Ce qui reste de vivant dans le bloc (la destruction a déjà eu lieu).
-    let mut alive = 0u32;
-    let mut mat = 0u8;
-    for dx in 0..CHUNK {
-        for dy in 0..CHUNK {
-            for dz in 0..CHUNK {
-                let c = key + IVec3::new(dx, dy, dz);
-                if world.is_solid(c) {
-                    alive += 1;
-                    mat = world.material(c);
-                }
+    let mut list: Vec<(IVec3, IVec3, u8)> = zones.into_values().collect();
+    // Sélection au hasard si la destruction est énorme (la plupart des
+    // voxels d'une grosse explosion sont pulvérisés).
+    if list.len() > MAX_PER_HIT {
+        for i in 0..MAX_PER_HIT {
+            let j = i + rng.usize(list.len() - i);
+            list.swap(i, j);
+        }
+        list.truncate(MAX_PER_HIT);
+    }
+
+    for (lo, hi, material) in list {
+        // Les vitres se brisent : pas de bloc.
+        if material == crate::world::mat::GLASS {
+            continue;
+        }
+        let min = world.cell_min(lo);
+        let max = world.cell_max(hi);
+        let center = (min + max) * 0.5;
+        // Un peu plus petit que la cavité : pas de contact initial.
+        let size = (max - min) * 0.9;
+        let half = size * 0.5;
+
+        let away = (center - impact).normalize_or_zero();
+        let strength = push.length().max(1.0);
+        let vel = away * (1.0 + rng.f32() * 1.5) * strength.sqrt()
+            + push * (0.3 + rng.f32() * 0.4)
+            + Vec3::new(rng.signed(), rng.f32() * 0.5, rng.signed()) * 1.2;
+
+        let entity = commands
+            .spawn((
+                Chunk {
+                    vel,
+                    spin: rng.signed() * 5.0,
+                    half,
+                    sleeping: false,
+                    rest: 0.0,
+                },
+                Mesh3d(assets.chunk_cube.clone()),
+                MeshMaterial3d(assets.materials[material as usize % assets.materials.len()].clone()),
+                Transform::from_translation(center).with_scale(size),
+            ))
+            .id();
+        rubble.order.push_back(entity);
+    }
+
+    // On garde un nombre raisonnable de blocs.
+    while rubble.order.len() > MAX_BLOCKS {
+        if let Some(old) = rubble.order.pop_front() {
+            commands.entity(old).despawn();
+        }
+    }
+}
+
+/// Réveille les blocs proches d'une destruction (ils peuvent avoir perdu
+/// leur support) et les pousse.
+pub fn wake_near(query: &mut Query<(&Transform, &mut Chunk)>, at: Vec3, radius: f32, push: f32) {
+    for (transform, mut chunk) in query.iter_mut() {
+        let d = transform.translation - at;
+        let dist = d.length();
+        if dist < radius + 1.5 {
+            chunk.sleeping = false;
+            chunk.rest = 0.0;
+            if push > 0.0 && dist < radius * 1.5 {
+                let falloff = 1.0 - (dist / (radius * 1.5)).min(1.0);
+                chunk.vel += d.normalize_or(Vec3::Y) * push * falloff + Vec3::Y * push * 0.4 * falloff;
             }
         }
     }
-
-    if alive == 0 {
-        if let Some(state) = chunks.map.remove(&key) {
-            commands.entity(state.entity).despawn();
-        }
-        return;
-    }
-
-    if let Some(state) = chunks.map.get_mut(&key) {
-        state.alive = alive as f32;
-        return;
-    }
-
-    if chunks.map.len() >= MAX_CHUNKS {
-        return;
-    }
-
-    // Nouveau bloc : il apparaît là où était le voxel cassé.
-    let size = chunk_size(alive as f32);
-    let half = Vec3::splat(size * 0.5);
-    let away = (world.cell_center(cell) - impact).normalize_or_zero();
-    let vel = away * (1.5 + rng.f32() * 2.5)
-        + Vec3::new(rng.signed(), rng.signed(), rng.signed()) * 1.2
-        + Vec3::Y * (0.5 + rng.f32() * 1.5);
-
-    let entity = commands
-        .spawn((
-            Chunk {
-                vel,
-                spin: Vec3::new(rng.signed() * 4.0, rng.signed() * 4.0, rng.signed() * 4.0),
-                half,
-                sleeping: false,
-                rest: 0.0,
-            },
-            Mesh3d(assets.chunk_cube.clone()),
-            MeshMaterial3d(assets.materials[mat as usize].clone()),
-            Transform::from_translation(world.cell_center(cell))
-                .with_scale(Vec3::splat(size))
-                .with_rotation(Quat::from_euler(
-                    EulerRot::YXZ,
-                    rng.signed() * 0.4,
-                    rng.signed() * 0.4,
-                    rng.signed() * 0.4,
-                )),
-        ))
-        .id();
-
-    chunks.map.insert(key, ChunkState { entity, alive: alive as f32 });
 }
 
-/// Recalcule la taille visuelle des blocs après un rétrécissement.
-pub fn sync_scales(
-    chunks: Res<Chunks>,
-    mut query: Query<(&mut Transform, &mut Chunk)>,
+/// Boîte `(min, max)` d'un bloc.
+pub fn aabb(transform: &Transform, chunk: &Chunk) -> (Vec3, Vec3) {
+    (transform.translation - chunk.half, transform.translation + chunk.half)
+}
+
+/// Supprime tous les gravats (régénération de la carte).
+pub fn clear_on_rebuild(
+    world: Res<VoxelWorld>,
+    mut seen: Local<u32>,
+    mut rubble: ResMut<Rubble>,
+    mut commands: Commands,
 ) {
-    for state in chunks.map.values() {
-        let size = chunk_size(state.alive);
-        let Ok((mut transform, mut chunk)) = query.get_mut(state.entity) else {
-            continue;
-        };
-        if (transform.scale.x - size).abs() > 0.005 {
-            transform.scale = Vec3::splat(size);
-            chunk.half = Vec3::splat(size * 0.5);
-        }
+    if *seen == world.generation {
+        return;
+    }
+    *seen = world.generation;
+    for entity in rubble.order.drain(..) {
+        commands.entity(entity).despawn();
     }
 }
 
-/// Gravité, sol, voxels et blocs voisins.
+/// Gravité, voxels, blocs voisins, sommeil.
 pub fn update(
     time: Res<Time>,
     world: Res<VoxelWorld>,
-    chunks: Res<Chunks>,
+    mut rubble: ResMut<Rubble>,
+    mut commands: Commands,
     mut query: Query<(Entity, &mut Transform, &mut Chunk)>,
 ) {
     let dt = time.delta_secs().min(0.05);
 
-    // Instantané des blocs pour les collisions mutuelles.
-    #[derive(Clone, Copy)]
-    struct Snap {
-        pos: Vec3,
-        half: Vec3,
-        sleeping: bool,
-    }
-    let mut snap: Vec<Snap> = Vec::with_capacity(chunks.len());
-    let mut grid: HashMap<IVec3, Vec<usize>> = HashMap::new();
+    // Instantané des blocs endormis pour les collisions mutuelles.
+    let mut grid: HashMap<IVec3, Vec<(Entity, Vec3, Vec3)>> = HashMap::new();
     for (entity, transform, chunk) in &query {
-        let key = (transform.translation / CELL).floor().as_ivec3();
-        let idx = snap.len();
-        snap.push(Snap {
-            pos: transform.translation,
-            half: chunk.half,
-            sleeping: chunk.sleeping,
-        });
-        grid.entry(key).or_default().push(idx);
-        let _ = entity;
+        if !chunk.sleeping {
+            continue;
+        }
+        let (min, max) = aabb(&transform, &chunk);
+        let c0 = (min / CELL).floor().as_ivec3();
+        let c1 = (max / CELL).floor().as_ivec3();
+        for x in c0.x..=c1.x {
+            for y in c0.y..=c1.y {
+                for z in c0.z..=c1.z {
+                    grid.entry(IVec3::new(x, y, z)).or_default().push((entity, min, max));
+                }
+            }
+        }
     }
 
-    for (i, (_, mut transform, mut chunk)) in query.iter_mut().enumerate() {
+    let mut lost = Vec::new();
+    for (entity, mut transform, mut chunk) in &mut query {
         if chunk.sleeping {
             continue;
         }
 
         chunk.vel.y -= GRAVITY * dt;
-        transform.translation += chunk.vel * dt;
-        transform.rotate(Quat::from_euler(
-            EulerRot::XYZ,
-            chunk.spin.x * dt,
-            chunk.spin.y * dt,
-            chunk.spin.z * dt,
-        ));
+        let mut pos = transform.translation;
 
-        // Filet de sécurité : très loin sous la carte (le sol a été détruit
-        // sous le bloc), on le pose sur le plan y = 0 plutôt que de le
-        // laisser tomber pour toujours.
-        if transform.translation.y < chunk.half.y {
-            transform.translation.y = chunk.half.y;
-            chunk.vel.y = -chunk.vel.y * 0.2;
-            chunk.vel.x *= 0.75;
-            chunk.vel.z *= 0.75;
-            chunk.spin *= 0.55;
-        }
-
-        // Contre les voxels encore debout (sol compris : pas de plan
-        // imaginaire, le terrain EST fait de voxels).
-        for axis in 0..3 {
-            let delta = get(chunk.vel, axis) * dt;
-            if delta != 0.0 {
-                let mut p = transform.translation;
-                if world.sweep(&mut p, chunk.half, axis, delta) {
-                    set(&mut transform.translation, axis, get(p, axis));
-                    set(&mut chunk.vel, axis, 0.0);
-                }
-            }
-        }
-
-        // Contre les blocs déjà posés (considérés comme statiques).
-        let here = (transform.translation / CELL).floor().as_ivec3();
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    let Some(list) = grid.get(&(here + IVec3::new(dx, dy, dz))) else {
-                        continue;
-                    };
-                    for &j in list {
-                        if j == i {
-                            continue;
-                        }
-                        let other = snap[j];
-                        if !other.sleeping {
-                            continue;
-                        }
-                        let d = transform.translation - other.pos;
-                        let overlap = (chunk.half + other.half) - d.abs();
-                        if overlap.min_element() > 0.0 {
-                            // On repousse le bloc mobile vers le haut.
-                            let push = overlap.min_element();
-                            transform.translation.y += push;
-                            chunk.vel.y = chunk.vel.y.max(0.0);
-                            chunk.vel.x *= 0.6;
-                            chunk.vel.z *= 0.6;
+        // Les autres blocs posés, autour de la trajectoire.
+        let reach = chunk.half + Vec3::splat(chunk.vel.length() * dt + 0.1);
+        let c0 = ((pos - reach) / CELL).floor().as_ivec3();
+        let c1 = ((pos + reach) / CELL).floor().as_ivec3();
+        let mut boxes: Vec<(Vec3, Vec3)> = Vec::new();
+        for x in c0.x..=c1.x {
+            for y in c0.y..=c1.y {
+                for z in c0.z..=c1.z {
+                    if let Some(list) = grid.get(&IVec3::new(x, y, z)) {
+                        for &(other, min, max) in list {
+                            if other != entity && !boxes.contains(&(min, max)) {
+                                boxes.push((min, max));
+                            }
                         }
                     }
                 }
             }
         }
 
+        // Y d'abord : le contact avec le sol décide du frottement.
+        let mut grounded = false;
+        for axis in [1, 0, 2] {
+            let delta = chunk.vel[axis] * dt;
+            if delta == 0.0 {
+                continue;
+            }
+            if world.sweep_with(&mut pos, chunk.half, axis, delta, &boxes) {
+                if axis == 1 && chunk.vel.y < 0.0 {
+                    grounded = true;
+                    chunk.vel.y = -chunk.vel.y * 0.18;
+                    if chunk.vel.y < 0.8 {
+                        chunk.vel.y = 0.0;
+                    }
+                    chunk.vel.x *= 0.6;
+                    chunk.vel.z *= 0.6;
+                    chunk.spin *= 0.5;
+                } else {
+                    chunk.vel[axis] = -chunk.vel[axis] * 0.25;
+                }
+            }
+        }
+
+        if grounded {
+            // Frottement au sol : un bloc glisse un peu puis s'arrête.
+            let friction = 1.0 - (6.0 * dt).min(1.0);
+            chunk.vel.x *= friction;
+            chunk.vel.z *= friction;
+        }
+
+        transform.translation = pos;
+        transform.rotate_y(chunk.spin * dt);
+
+        // Tombé hors du monde.
+        if pos.y < -8.0 {
+            lost.push(entity);
+            continue;
+        }
+
         // Mise en sommeil.
-        if chunk.vel.length() < 0.35 {
+        if grounded && chunk.vel.length() < 0.4 {
             chunk.rest += dt;
-            if chunk.rest > 0.35 {
+            if chunk.rest > 0.25 {
                 chunk.sleeping = true;
                 chunk.vel = Vec3::ZERO;
-                chunk.spin = Vec3::ZERO;
+                chunk.spin = 0.0;
             }
-        } else {
+        } else if !grounded {
             chunk.rest = 0.0;
         }
     }
-}
 
-fn get(v: Vec3, a: usize) -> f32 {
-    match a {
-        0 => v.x,
-        1 => v.y,
-        _ => v.z,
+    for entity in lost {
+        commands.entity(entity).despawn();
+        rubble.order.retain(|&e| e != entity);
     }
 }
 
-fn set(v: &mut Vec3, a: usize, value: f32) {
-    match a {
-        0 => v.x = value,
-        1 => v.y = value,
-        _ => v.z = value,
+/// Les blocs endormis dont le support a été détruit retombent.
+pub fn wake_unsupported(
+    time: Res<Time>,
+    world: Res<VoxelWorld>,
+    mut watch: Local<(u32, f32)>,
+    mut query: Query<(&Transform, &mut Chunk)>,
+) {
+    // On ne vérifie que pendant les secondes qui suivent une destruction
+    // (le temps que les blocs du dessus retombent en cascade).
+    if watch.0 != world.alive {
+        *watch = (world.alive, 2.5);
+    }
+    if watch.1 <= 0.0 {
+        return;
+    }
+    watch.1 -= time.delta_secs();
+
+    let blocks: Vec<(Vec3, Vec3)> = query
+        .iter()
+        .filter(|(_, c)| c.sleeping)
+        .map(|(t, c)| aabb(t, c))
+        .collect();
+
+    for (transform, mut chunk) in &mut query {
+        if !chunk.sleeping {
+            continue;
+        }
+        let (min, max) = aabb(transform, &chunk);
+        // Petite tranche juste sous le bloc.
+        let below_min = Vec3::new(min.x + 0.02, min.y - 0.06, min.z + 0.02);
+        let below_max = Vec3::new(max.x - 0.02, min.y + 0.01, max.z - 0.02);
+        if world.overlaps(below_min, below_max) {
+            continue;
+        }
+        let on_block = blocks.iter().any(|&(bmin, bmax)| {
+            bmin.x < below_max.x
+                && bmax.x > below_min.x
+                && bmin.z < below_max.z
+                && bmax.z > below_min.z
+                && bmax.y >= below_min.y
+                && bmax.y <= below_max.y + 0.05
+                && bmin != min
+        });
+        if !on_block {
+            chunk.sleeping = false;
+            chunk.rest = 0.0;
+        }
     }
 }

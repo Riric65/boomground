@@ -17,8 +17,8 @@ pub const DEFAULT_PORT: u16 = 28431;
 pub enum Packet {
     /// Client → serveur : demande d'entrée.
     Join { name: String },
-    /// Serveur → client : identifiant attribué.
-    Welcome { id: u16 },
+    /// Serveur → client : identifiant attribué et seed de la carte.
+    Welcome { id: u16, seed: u64 },
     /// Client → serveur : position/regard (envoyé en continu).
     State {
         pos: Vec3,
@@ -34,7 +34,9 @@ pub enum Packet {
         blast: f32,
     },
     /// Serveur → client : voxels réellement détruits (autorité).
-    Voxels { cells: Vec<[u16; 3]> },
+    /// `rubble` : faut-il créer des gravats (pas pour l'historique envoyé à
+    /// un joueur qui arrive).
+    Voxels { cells: Vec<[u16; 3]>, rubble: bool },
     /// Serveur → client : autre joueur.
     Player {
         id: u16,
@@ -45,24 +47,10 @@ pub enum Packet {
     },
     /// Serveur → client : joueur parti.
     PlayerLeft { id: u16 },
-    /// Client → serveur : la C4 est posée.
-    C4Placed { at: Vec3 },
-    /// Serveur → client : la C4 a détoné.
+    /// Bombe posée (client → serveur → autres clients).
+    BombPlaced { at: Vec3, weapon: u8 },
+    /// Serveur → autres clients : une explosion a eu lieu (effets).
     Explode { at: Vec3, radius: f32 },
-    /// Serveur → client : gravats (apparition / disparition). La physique
-    /// reste locale, mais tout le monde voit les mêmes blocs.
-    Chunks {
-        spawned: Vec<ChunkState>,
-        removed: Vec<[i16; 3]>,
-    },
-}
-
-/// Un bloc de gravats tel qu'il est décrit par le serveur.
-#[derive(Debug, Clone, Copy)]
-pub struct ChunkState {
-    pub key: [i16; 3],
-    pub at: [f32; 3],
-    pub material: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,9 +89,10 @@ impl Packet {
                 body.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
                 body.extend_from_slice(bytes);
             }
-            Packet::Welcome { id } => {
+            Packet::Welcome { id, seed } => {
                 body.push(1);
                 body.extend_from_slice(&id.to_le_bytes());
+                body.extend_from_slice(&seed.to_le_bytes());
             }
             Packet::State {
                 pos,
@@ -129,8 +118,9 @@ impl Packet {
                 write_vec3(&mut body, *dir);
                 body.extend_from_slice(&blast.to_le_bytes());
             }
-            Packet::Voxels { cells } => {
+            Packet::Voxels { cells, rubble } => {
                 body.push(4);
+                body.push(*rubble as u8);
                 body.extend_from_slice(&(cells.len() as u16).to_le_bytes());
                 for c in cells {
                     body.extend_from_slice(&c[0].to_le_bytes());
@@ -156,33 +146,15 @@ impl Packet {
                 body.push(6);
                 body.extend_from_slice(&id.to_le_bytes());
             }
-            Packet::C4Placed { at } => {
+            Packet::BombPlaced { at, weapon } => {
                 body.push(7);
                 write_vec3(&mut body, *at);
+                body.push(*weapon);
             }
             Packet::Explode { at, radius } => {
                 body.push(8);
                 write_vec3(&mut body, *at);
                 body.extend_from_slice(&radius.to_le_bytes());
-            }
-            Packet::Chunks { spawned, removed } => {
-                body.push(9);
-                body.extend_from_slice(&(spawned.len() as u16).to_le_bytes());
-                for c in spawned {
-                    body.extend_from_slice(&c.key[0].to_le_bytes());
-                    body.extend_from_slice(&c.key[1].to_le_bytes());
-                    body.extend_from_slice(&c.key[2].to_le_bytes());
-                    body.extend_from_slice(&c.at[0].to_le_bytes());
-                    body.extend_from_slice(&c.at[1].to_le_bytes());
-                    body.extend_from_slice(&c.at[2].to_le_bytes());
-                    body.push(c.material);
-                }
-                body.extend_from_slice(&(removed.len() as u16).to_le_bytes());
-                for key in removed {
-                    body.extend_from_slice(&key[0].to_le_bytes());
-                    body.extend_from_slice(&key[1].to_le_bytes());
-                    body.extend_from_slice(&key[2].to_le_bytes());
-                }
             }
         }
 
@@ -200,7 +172,10 @@ impl Packet {
                 let name = cur.string()?;
                 Packet::Join { name }
             }
-            1 => Packet::Welcome { id: cur.u16()? },
+            1 => Packet::Welcome {
+                id: cur.u16()?,
+                seed: cur.u64()?,
+            },
             2 => Packet::State {
                 pos: cur.vec3()?,
                 yaw: cur.f32()?,
@@ -214,12 +189,13 @@ impl Packet {
                 blast: cur.f32()?,
             },
             4 => {
+                let rubble = cur.u8()? != 0;
                 let n = cur.u16()?;
                 let mut cells = Vec::with_capacity(n as usize);
                 for _ in 0..n {
                     cells.push([cur.u16()?, cur.u16()?, cur.u16()?]);
                 }
-                Packet::Voxels { cells }
+                Packet::Voxels { cells, rubble }
             }
             5 => Packet::Player {
                 id: cur.u16()?,
@@ -229,28 +205,14 @@ impl Packet {
                 weapon: cur.u8()?,
             },
             6 => Packet::PlayerLeft { id: cur.u16()? },
-            7 => Packet::C4Placed { at: cur.vec3()? },
+            7 => Packet::BombPlaced {
+                at: cur.vec3()?,
+                weapon: cur.u8()?,
+            },
             8 => Packet::Explode {
                 at: cur.vec3()?,
                 radius: cur.f32()?,
             },
-            9 => {
-                let n = cur.u16()?;
-                let mut spawned = Vec::with_capacity(n as usize);
-                for _ in 0..n {
-                    spawned.push(ChunkState {
-                        key: [cur.u16()? as i16, cur.u16()? as i16, cur.u16()? as i16],
-                        at: [cur.f32()?, cur.f32()?, cur.f32()?],
-                        material: cur.u8()?,
-                    });
-                }
-                let n = cur.u16()?;
-                let mut removed = Vec::with_capacity(n as usize);
-                for _ in 0..n {
-                    removed.push([cur.u16()? as i16, cur.u16()? as i16, cur.u16()? as i16]);
-                }
-                Packet::Chunks { spawned, removed }
-            }
             _ => return None,
         })
     }
@@ -279,6 +241,9 @@ impl<'a> Cursor<'a> {
     }
     fn u16(&mut self) -> Option<u16> {
         Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
+    }
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
     fn f32(&mut self) -> Option<f32> {
         Some(f32::from_le_bytes(self.take(4)?.try_into().ok()?))
@@ -349,4 +314,46 @@ pub fn split_address(address: &str) -> (String, u16) {
         }
     }
     (address.to_string(), DEFAULT_PORT)
+}
+/// Nombre maximal de cellules par paquet `Voxels` (la trame fait au plus
+/// 65 535 octets).
+pub const MAX_CELLS_PER_PACKET: usize = 10_000;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packets_round_trip() {
+        let packets = [
+            Packet::Welcome { id: 3, seed: 123_456_789 },
+            Packet::Voxels {
+                cells: vec![[1, 2, 3], [300, 40, 383]],
+                rubble: true,
+            },
+            Packet::BombPlaced {
+                at: Vec3::new(1.0, 2.0, 3.0),
+                weapon: 11,
+            },
+            Packet::Explode {
+                at: Vec3::ONE,
+                radius: 7.0,
+            },
+        ];
+        for p in packets {
+            let bytes = p.encode();
+            let mut reader = FrameReader::default();
+            reader.push(&bytes);
+            let frame = reader.next().expect("trame complète");
+            let back = Packet::decode(&frame).expect("décodage");
+            assert_eq!(format!("{p:?}"), format!("{back:?}"));
+        }
+    }
+
+    #[test]
+    fn biggest_voxel_packet_fits_in_a_frame() {
+        let cells = vec![[0u16; 3]; MAX_CELLS_PER_PACKET];
+        let bytes = Packet::Voxels { cells, rubble: false }.encode();
+        assert!(bytes.len() - 2 <= u16::MAX as usize);
+    }
 }

@@ -1,97 +1,140 @@
-//! Mode test (`BOOM_AUTO=1`) : le jeu joue tout seul (regard, marche, frappes)
-//! et écrit des captures dans `/tmp/opencode/boom/`, ce qui permet de valider
-//! le rendu et la destruction sans simulation de clavier.
+//! Mode test (`BOOM_AUTO=1`) : le jeu joue tout seul (regard, marche,
+//! actions) et écrit des captures dans le dossier temporaire
+//! (`<tmp>/boomground/`), ce qui permet de valider le rendu et la
+//! destruction sans simulation de clavier.
+//!
+//! Variables utiles : `BOOM_WEAPON=hammer|sledge|glock|rifle|c4|…`,
+//! `BOOM_MODE=normal`, `BOOM_SEED=1234`, `BOOM_MENU=1` (reste au menu),
+//! `BOOM_SHOP=1` (ouvre la boutique), `BOOM_OVERVIEW=1` (vue du dessus),
+//! `BOOM_NO_DRIFT=1` (caméra fixe), `BOOM_SERVER=hôte[:port]`.
 //!
 //! Inactif en fonctionnement normal.
+
+use std::path::PathBuf;
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy::window::CursorOptions;
 
-/// Dossier des captures automatiques.
-const SHOT_DIR: &str = "/tmp/opencode/boom";
+use crate::game::{GameState, Mode, Phase, WeaponId, ALL_WEAPONS};
 
 pub fn enabled() -> bool {
     std::env::var("BOOM_AUTO").is_ok_and(|v| v == "1")
 }
 
+fn env(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+
+/// Dossier des captures automatiques.
+pub fn shot_dir() -> PathBuf {
+    std::env::temp_dir().join("boomground")
+}
+
 /// Injecte la ressource de test si le mode est actif.
 pub fn setup(mut commands: Commands) {
     if enabled() {
-        std::fs::create_dir_all(SHOT_DIR).ok();
+        std::fs::create_dir_all(shot_dir()).ok();
         commands.insert_resource(Auto::default());
-    }
-}
-
-/// Ouvre le panneau multijoueur (validation) : `BOOM_MULTI=1`.
-pub fn open_multi(mut view: ResMut<crate::menu::MenuView>) {
-    if std::env::var("BOOM_MULTI").is_ok() {
-        view.show_multi = true;
-    }
-}
-
-/// Ouvre le panneau des paramètres (validation) : `BOOM_SETTINGS=1`.
-pub fn open_settings(mut view: ResMut<crate::menu::MenuView>) {
-    if std::env::var("BOOM_SETTINGS").is_ok() {
-        view.show_settings = true;
     }
 }
 
 /// Vue d'ensemble de la carte (validation) : caméra haute, sans dérive.
 pub fn overview(
-    mut game: ResMut<crate::game::GameState>,
-    mut player: Query<&mut Transform, With<crate::player::Player>>,
+    mut player: Query<(&mut Transform, &mut crate::player::Body), With<crate::player::Player>>,
     mut head: Query<&mut Transform, (With<crate::player::Head>, Without<crate::player::Player>)>,
 ) {
-    if std::env::var("BOOM_OVERVIEW").is_err() {
+    if !env("BOOM_OVERVIEW") {
         return;
     }
-    game.phase = crate::game::Phase::Playing;
-    if let Ok(mut t) = player.single_mut() {
-        t.translation = Vec3::new(0.0, 46.0, 4.0);
-        t.rotation = Quat::from_rotation_y(0.35);
+    if let Ok((mut t, mut body)) = player.single_mut() {
+        t.translation = Vec3::new(-30.0, 70.0, 60.0);
+        t.rotation = Quat::from_rotation_y(-0.45);
+        body.fly = true;
+        body.vel = Vec3::ZERO;
     }
     if let Ok(mut t) = head.single_mut() {
-        t.rotation = Quat::from_rotation_x(-1.15);
+        t.rotation = Quat::from_rotation_x(-0.75);
     }
-    if std::env::var("BOOM_VERBOSE").is_ok() {
-        info!("OVERVIEW {:?}", player.single().map(|p| p.translation));
+}
+
+/// Orientation / position de départ des tests : `BOOM_YAW=1.57`,
+/// `BOOM_POS=x,z` (mètres).
+pub fn pose(
+    mut frames: Local<u32>,
+    world: Res<crate::world::VoxelWorld>,
+    mut player: Query<(&mut Transform, &mut crate::player::Body), With<crate::player::Player>>,
+) {
+    *frames += 1;
+    if *frames != 3 {
+        return;
+    }
+    let Ok((mut t, mut body)) = player.single_mut() else { return };
+    if let Some(yaw) = std::env::var("BOOM_YAW").ok().and_then(|v| v.parse::<f32>().ok()) {
+        body.yaw = yaw;
+        t.rotation = Quat::from_rotation_y(yaw);
+    }
+    if let Some((x, z)) = std::env::var("BOOM_POS").ok().and_then(|v| {
+        let (a, b) = v.split_once(',')?;
+        Some((a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?))
+    }) {
+        t.translation = Vec3::new(x, world.ground_height(x, z) + 0.05, z);
     }
 }
 
 /// En mode auto, on saute le menu et on démarre directement la partie.
-/// `BOOM_SERVER=host[:port]` connecte aussi à un serveur de test.
 pub fn force_playing(
-    mut game: ResMut<crate::game::GameState>,
+    mut game: ResMut<GameState>,
+    mut world: ResMut<crate::world::VoxelWorld>,
     mut cursor: Single<&mut CursorOptions>,
     mut net: ResMut<crate::net::client::NetClient>,
+    mut shop: ResMut<crate::shop::ShopState>,
+    mut done: Local<bool>,
 ) {
-    // `BOOM_MENU=1` : on reste sur le menu (pour le vérifier à l'écran).
-    if game.phase == crate::game::Phase::Menu && std::env::var("BOOM_MENU").is_err() {
-        if let Ok(address) = std::env::var("BOOM_SERVER") {
-            net.address = address;
-            match net.connect() {
-                Ok(target) => info!("connecté à {target}"),
-                Err(e) => error!("connexion impossible : {e}"),
-            }
+    if *done || env("BOOM_MENU") {
+        return;
+    }
+    *done = true;
+    if let Ok(address) = std::env::var("BOOM_SERVER") {
+        net.address = address;
+        match net.connect() {
+            Ok(target) => info!("connecté à {target}"),
+            Err(e) => error!("connexion impossible : {e}"),
         }
-        game.phase = crate::game::Phase::Playing;
-        cursor.grab_mode = CursorGrabMode::Locked;
-        cursor.visible = false;
+    }
+    game.mode = if std::env::var("BOOM_MODE").is_ok_and(|m| m == "normal") {
+        Mode::Normal
+    } else {
+        Mode::Sandbox
+    };
+    if let Some(seed) = std::env::var("BOOM_SEED").ok().and_then(|s| crate::game::parse_seed(&s)) {
+        game.seed = seed;
+        world.rebuild(seed);
+    }
+    game.reset_inventory();
+    if game.mode == Mode::Normal {
+        game.money = 5_000;
+    }
+    game.started = true;
+    game.phase = Phase::Playing;
+    if env("BOOM_SHOP") {
+        shop.open = true;
+    } else {
+        crate::player::grab(&mut cursor, true);
     }
 }
 
 #[derive(Resource)]
 pub struct Auto {
-    /// Déclenche un coup toutes les 0,45 s.
+    /// Déclenche une action toutes les 0,45 s.
     swing: Timer,
     weapon_tick: Timer,
-    /// Marche vers le mur pendant 1,1 s, puis s'arrête.
+    /// Marche pendant 1,1 s, puis s'arrête.
     walk: Timer,
     shot: Timer,
     shot_index: u32,
-    started: bool,
+    right_clicks: u32,
 }
 
 impl Default for Auto {
@@ -99,75 +142,90 @@ impl Default for Auto {
         Self {
             swing: Timer::from_seconds(0.45, TimerMode::Repeating),
             weapon_tick: Timer::from_seconds(4.0, TimerMode::Repeating),
-            walk: Timer::from_seconds(1.1, TimerMode::Once),
-            shot: Timer::from_seconds(2.0, TimerMode::Once),
+            walk: Timer::from_seconds(
+                std::env::var("BOOM_WALK")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1.1),
+                TimerMode::Once,
+            ),
+            shot: Timer::from_seconds(3.0, TimerMode::Once),
             shot_index: 0,
-            started: false,
+            right_clicks: 0,
         }
     }
 }
 
-/// Regard qui balaye, marche vers le mur, puis frappe en continu.
+/// Regard qui balaye, marche, puis agit en continu.
+#[allow(clippy::too_many_arguments)]
 pub fn autopilot(
     auto: Option<ResMut<Auto>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut buttons: ResMut<ButtonInput<MouseButton>>,
     mut mouse: ResMut<AccumulatedMouseMotion>,
-    mut cursor: Single<&mut CursorOptions>,
-    mut game_state: ResMut<crate::game::GameState>,
+    mut game: ResMut<GameState>,
     mut commands: Commands,
     time: Res<Time>,
 ) {
     let Some(mut auto) = auto else { return };
+    let overview = env("BOOM_OVERVIEW");
+    let on_menu = env("BOOM_MENU") || env("BOOM_SHOP");
 
-    if !auto.started {
-        auto.started = true;
-        cursor.grab_mode = CursorGrabMode::Locked;
-        cursor.visible = false;
+    // Balayage lent, pour voir sous différents angles (désactivable).
+    if !env("BOOM_NO_DRIFT") && !overview && !on_menu {
+        mouse.delta += Vec2::new(0.6, 0.0);
     }
 
-    // Balayage lent, pour voir le mur sous différents angles (désactivable).
-    if std::env::var("BOOM_NO_DRIFT").is_err() && std::env::var("BOOM_OVERVIEW").is_err() {
-        mouse.delta += Vec2::new(0.3, -0.08);
-    }
-
-    // `BOOM_WEAPON=glock|c4|sledge` force une arme, sinon on les alterne.
-    if auto.weapon_tick.tick(time.delta()).just_finished() {
+    // `BOOM_WEAPON=nom` force une arme, sinon on les alterne.
+    if auto.weapon_tick.tick(time.delta()).just_finished() || auto.shot_index == 0 {
         let fixed = std::env::var("BOOM_WEAPON").ok();
-        game_state.weapon = match fixed.as_deref() {
-            Some("glock") => crate::game::Weapon::Glock,
-            Some("c4") => crate::game::Weapon::C4,
-            Some("sledge") => crate::game::Weapon::Sledge,
-            _ => game_state.weapon.next(),
+        let wanted = fixed.as_deref().and_then(|name| {
+            ALL_WEAPONS
+                .iter()
+                .copied()
+                .find(|w| format!("{w:?}").eq_ignore_ascii_case(name))
+        });
+        game.weapon = match wanted {
+            Some(w) => w,
+            None if auto.weapon_tick.just_finished() => {
+                let owned = game.owned();
+                let i = owned.iter().position(|&w| w == game.weapon).unwrap_or(0);
+                owned[(i + 1) % owned.len()]
+            }
+            None => game.weapon,
         };
-        game_state.ammo = crate::game::GLOCK_MAG;
-        game_state.c4 = 5;
+        if game.weapon == WeaponId::Hammer && fixed.is_none() && game.sandbox() {
+            game.weapon = WeaponId::Sledge;
+        }
     }
 
     auto.walk.tick(time.delta());
-    if auto.walk.is_finished() || std::env::var("BOOM_OVERVIEW").is_ok() {
+    if auto.walk.is_finished() || overview || on_menu {
         keys.release(KeyCode::KeyW);
     } else {
         keys.press(KeyCode::KeyW);
     }
 
-    // Sur le menu, on ne clique pas (sinon on lance une partie).
-    let on_menu = std::env::var("BOOM_MENU").is_ok() && !game_state.in_game();
-    let overview = std::env::var("BOOM_OVERVIEW").is_ok();
-
     auto.swing.tick(time.delta());
     if !on_menu && !overview && auto.swing.just_finished() {
         buttons.release(MouseButton::Left);
         buttons.press(MouseButton::Left);
+        // De temps en temps, clic droit : la C4 posée saute.
+        auto.right_clicks += 1;
+        buttons.release(MouseButton::Right);
+        if auto.right_clicks % 6 == 0 {
+            buttons.press(MouseButton::Right);
+        }
     }
 
     // Captures d'écran pour la validation visuelle.
     auto.shot.tick(time.delta());
-    if auto.shot.just_finished() && auto.shot_index < 3 {
+    if auto.shot.just_finished() && auto.shot_index < 4 {
+        let path = shot_dir().join(format!("shot{}.png", auto.shot_index));
         commands
             .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(format!("{SHOT_DIR}/shot{}.png", auto.shot_index)));
+            .observe(save_to_disk(path));
         auto.shot_index += 1;
-        auto.shot = Timer::from_seconds(5.0, TimerMode::Once);
+        auto.shot = Timer::from_seconds(2.5, TimerMode::Once);
     }
 }
