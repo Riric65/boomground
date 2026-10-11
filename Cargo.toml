@@ -1,7 +1,15 @@
 [package]
 name = "boomground"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+description = "Destruction de voxels en bac à sable ou en mode boutique."
+default-run = "boomground"
+
+[workspace]
+members = [".", "installer"]
+# L'installateur embarque le jeu compilé : on le construit à part, après le
+# jeu (voir scripts/package.*).
+default-members = ["."]
 
 [dependencies]
 # "wav" : les bruitages sont synthétisés à la volée puis encodés en WAV, ce qui
@@ -17,3 +25,10 @@ debug = 1
 [profile.dev.package."*"]
 opt-level = 2
 debug = false
+
+# Version distribuée : rapide et compacte.
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+panic = "abort"

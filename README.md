@@ -1,98 +1,153 @@
 # BoomGround
 
-Destruction de voxels à la masse, au Glock et à la C4 — en Rust + Bevy, style
-Teardown. **Tout est destructible : bâtiments, murs et sol.**
+Destruction de voxels façon Teardown, en Rust + Bevy. **Tout est destructible**
+(sauf la couche de socle tout en bas) : immeubles, vitres, voitures, arbres, routes, sol.
 
-## Lancer
+## Installer (joueurs)
 
-```bash
-cargo run                      # le client
-cargo run --bin boomground-server   # le serveur, port 28431
-```
+Il n'y a rien à compiler et aucun terminal à ouvrir.
 
-| Variable | Effet |
+| Système | Fichier | Ce qu'il fait |
+|---|---|---|
+| Windows | `BoomGround-Setup-Windows.exe` | Double-clic, puis « Oui ». Installe le jeu dans `%LOCALAPPDATA%\Programs\BoomGround` (sans droits administrateur), crée les raccourcis Bureau et menu Démarrer, et ajoute une entrée dans « Applications installées » pour désinstaller. |
+| Linux | `BoomGround-Setup-Linux` | Double-clic (ou `./BoomGround-Setup-Linux`). Ajoute BoomGround au menu des applications et la commande `boomground`. |
+| macOS | `BoomGround-Setup-macOS` | Clic droit puis **Ouvrir** la première fois (l'application n'est pas signée). Crée `~/Applications/BoomGround.app`. |
+
+Des versions **portables** (`BoomGround-Windows.exe`, `BoomGround-Linux`, `BoomGround-macOS`)
+se lancent aussi directement, sans installation : le jeu tient en un seul fichier, polices comprises.
+
+Pour désinstaller : Windows → « Applications installées » → BoomGround ; Linux/macOS →
+relancer l'installateur avec `--uninstall`.
+
+## Modes de jeu
+
+- **Bac à sable** : les 13 armes sont données d'office, munitions et bombes illimitées.
+  `V` active le vol libre.
+- **Mode normal** : on commence avec un simple marteau. Chaque voxel détruit rapporte
+  de l'argent (brique 2 $, métal 3 $, verre 2 $, béton/bois/plâtre 1 $ ; le sol ne
+  rapporte rien). La **boutique** (`B`) vend de meilleurs marteaux, des armes à feu,
+  des munitions et des bombes, qui permettent de casser plus vite et donc de gagner plus.
+
+## Carte et seed
+
+La ville (153 × 153 m, 384 × 64 × 384 voxels) est **générée à partir d'une seed** :
+rues, tours de bureaux, immeubles de briques avec escaliers praticables, entrepôts,
+tours de verre, maisons, parcs, parkings avec voitures, chantiers.
+
+- Dans le menu, la seed peut être un nombre ou un mot (`paris` donne toujours la même ville).
+  « Hasard » en tire une nouvelle, et une seed laissée vide est tirée au hasard.
+- En jeu : `F5` reconstruit la même ville, `F6` en génère une nouvelle.
+
+## Arsenal
+
+| Famille | Armes |
 |---|---|
-| `BOOM_FPS=144` | force la limite d'images (sinon : celle de l'écran) |
-| `BOOM_PORT=3000` | port du serveur (défaut `28431`) |
-| `BOOM_AUTO=1` | autopilot de test + captures dans `/tmp/opencode/boom/` |
-| `BOOM_WEAPON=glock\|c4\|sledge` | force une arme en mode auto |
-| `BOOM_NO_DRIFT=1` / `BOOM_OVERVIEW=1` / `BOOM_MENU=1` / `BOOM_SETTINGS=1` | fige la caméra / vue du dessus / reste au menu / ouvre les réglages |
+| Marteaux | Marteau, Masse, Masse de guerre, Marteau-piqueur (continu) |
+| Armes à feu | Glock 17, Fusil à pompe (9 plombs), Fusil d'assaut (automatique), Sniper .50 (traverse les murs), Lance-roquettes |
+| Bombes lancées | Grenade (rebondit), Dynamite (colle à la surface) |
+| Bombes posées | C4 (clic droit pour toutes les faire sauter), Méga-bombe (minuterie de 8 s, rayon de 7 m) |
+
+Les explosions s'enchaînent : une bombe prise dans le souffle d'une autre saute à son tour.
 
 ## Contrôles
 
 | Touche | Action |
 |---|---|
-| ZQSD / WASD | se déplacer (balancement de marche, atterrissage) |
+| ZQSD / WASD, flèches | se déplacer (les marches d'un voxel se montent sans sauter) |
+| Maj | courir |
+| Espace | sauter (en vol libre : monter ; Ctrl/C : descendre) |
 | Souris | regarder (clic = capturer le curseur) |
 | Clic gauche | agir avec l'arme en main |
-| 1 / 2 / 3 ou molette | masse / Glock 17 / C4 |
-| R | recharger le Glock |
-| F5 | reconstruire le niveau |
-| Échap / F1 | menu |
+| Clic droit | faire sauter les C4 posées |
+| 1…9, 0, molette, Q / E | changer d'arme |
+| R | recharger |
+| B ou Tab | boutique (mode normal) |
+| V | vol libre (bac à sable) |
+| H | masquer l'aide |
+| F5 / F6 | même ville / nouvelle ville |
+| Échap | menu (pause) |
 
-Menu **PARAMÈTRES** : sensibilité, volume, limite d'images, inversion de l'axe Y.
+Les réglages (sensibilité, volume, limite d'images, axe Y inversé) sont enregistrés
+dans `%APPDATA%\BoomGround` (Windows), `~/Library/Application Support/BoomGround`
+(macOS) ou `~/.config/boomground` (Linux).
 
 ## Multijoueur
 
-Sur la machine qui héberge : `cargo run --bin boomground-server` (écoute sur
-`0.0.0.0:28431`). Les clients choisissent **MULTIJOUEUR** et saisissent
-`domaine.tld`, `ip`, ou `ip:port` (sinon port **28431** par défaut).
-Si aucun serveur ne répond, le client le dit explicitement au lieu de renvoyer
-une erreur brute.
+- **Héberger** : Menu → MULTIJOUEUR → HÉBERGER. Le serveur tourne dans le jeu lui-même,
+  sans fenêtre ni terminal, sur le port **28431** avec la seed choisie.
+- **Rejoindre** : Menu → MULTIJOUEUR, saisir `ip`, `ip:port` ou `domaine.tld`, puis REJOINDRE.
+- **Serveur dédié** (facultatif) : `BoomGround-Server-<os>` (variables `BOOM_PORT`, `BOOM_SEED`).
 
-- **Prédiction locale** puis **autorité du serveur** sur les voxels et les
-  gravats : réponse immédiate chez soi, état juste pour tout le monde.
-- **Anti-triche** : cadence par arme, distance du rayon par rapport à la
-  position connue, rayon borné, cohérence du tir, budget de destruction
-  (300 voxels/s/joueur), téléportation bornée à 20 m/s, C4 à portée.
-- **Le son est en 3D** (`SpatialListener` sur la caméra) : un coup de feu
-  s'entend du bon côté et s'atténue avec la distance ; le tic de la C4 vient
-  de la C4.
+Tout le monde reçoit la seed du serveur et l'historique des destructions : un joueur
+qui arrive en cours de partie voit la ville dans son état actuel. Le serveur valide
+chaque action (cadence, portée, rayon maximal par type d'arme, téléportation).
+Le multijoueur se joue en bac à sable.
 
-Vérifié par un client de test : flood de 50 balles → 48 rejets, tir à 500 m →
-rejeté, tirs à cadence normale → voxels + gravats diffusés.
+## Corrections de cette version
 
-## Physique
+- **Collisions** : le joueur pouvait traverser les murs fins quand le jeu ralentissait,
+  et se faisait téléporter de l'autre côté d'un cube quand il y entrait. Les déplacements
+  sont désormais découpés en petits pas, et seuls les voxels **devant** comptent :
+  on ne peut plus rester coincé ni être éjecté. Les gravats sont de vrais obstacles
+  (on monte dessus), les marches se gravissent et on reste collé au sol en descente.
+- **Cubes de gravats** : leur logique était inversée. Casser un voxel faisait apparaître
+  un bloc presque plein **dans le mur restant**, qui disparaissait ensuite quand on
+  finissait de casser la zone. Maintenant, chaque bloc a la taille exacte des voxels
+  cassés et apparaît dans le trou. Il ne tourne plus que sur l'axe vertical, donc sa
+  boîte de collision correspond à ce qu'on voit (fini les cubes penchés qui flottent),
+  et il retombe si son support est détruit. Le nombre de blocs est limité.
+- **Rendu** : une grosse destruction ne mettait à jour que 8 morceaux de la carte, ce
+  qui laissait des voxels « fantômes » visibles. Le reste était perdu, et `F5` ne
+  reconstruisait presque rien. Les faces au bord de la carte manquaient aussi, et les
+  gravats n'avaient pas la même couleur que les murs (conversion sRGB/linéaire).
+- **Armes** : la caméra des armes repeignait l'écran (couleur du ciel), la C4 posée
+  mesurait 4 cm, la traçante était mal orientée, et la secousse laissait la caméra
+  penchée. Toutes les armes ont désormais leur modèle et leurs animations (coup,
+  recul, recharge, lancer, sortie d'arme).
+- **Sons** : chaque son créait une entité jamais supprimée (fuite de mémoire). Les sons
+  sont maintenant synthétisés une seule fois au démarrage.
+- **Réseau** : le serveur rejetait tout tir à plus de 8 m (Glock compris), refusait la
+  première position du joueur, détruisait des voxels sans les diffuser quand le budget
+  était dépassé, et la C4 était dupliquée chez celui qui la posait. Les trames pouvaient
+  aussi être coupées sur un socket non bloquant. Le serveur dédié tournait à 100 % d'un cœur.
 
-| Corps | Collisions |
-|---|---|
-| Joueur | voxels (boîte 0,6 × 1,7 × 0,6 m) **+ blocs de gravats** : on gravit un tas au lieu de le traverser |
-| Blocs de gravats | voxels du terrain + blocs voisins déjà posés (grille spatiale), puis sommeil définitif |
-| Débris | voxels du terrain, rebond amorti, frottement au sol : ils ricochent puis se posent |
+## Développement
 
-Il n'existe **aucun plan de sol imaginaire** : tout repose sur la grille de
-voxels, donc un trou creusé dans le sol laisse tomber ce qui se trouve
-dessus.
+```bash
+cargo run                              # le jeu (debug optimisé)
+cargo run --bin boomground-server      # serveur dédié
+cargo test                             # tests (collisions, maillage, protocole, boutique…)
+```
 
-## Réseau
+Construire les installateurs :
 
-`localhost` se résout d'abord en `::1` alors que le serveur n'écoute qu'en
-IPv4 : le client essaie donc **toutes les adresses résolues** avant d'abandonner,
-sinon le multijoueur local échoue systématiquement.
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/package.ps1   # Windows
+sh scripts/package.sh                                          # Linux / macOS
+```
+
+Les fichiers sont générés dans `dist/`. Le workflow GitHub `.github/workflows/release.yml`
+construit les trois systèmes à chaque push, et publie une release sur un tag `v*`.
+Sous Linux, la compilation nécessite `libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev`.
+
+Mode test automatique : `BOOM_AUTO=1` (captures dans `<dossier temporaire>/boomground/`),
+avec `BOOM_WEAPON=rifle`, `BOOM_MODE=normal`, `BOOM_SEED=42`, `BOOM_SHOP=1`,
+`BOOM_MENU=1`, `BOOM_OVERVIEW=1`, `BOOM_SERVER=hôte`.
 
 ## Architecture
 
 | Module | Rôle |
 |---|---|
-| `world.rs` | grille de 128×56×128 : **bitset** d'occupation + 1 octet de matériau par cellule (~1 Mo pour 105 000 voxels), rayon DDA, `carve` sans entité, `sweep` partagé par toutes les collisions |
-| `map.rs` | génération de la carte : sol, route, trottoirs, 4 bâtiments (fenêtres, portes, étages, murs de 2 voxels d'épaisseur), caisses |
-| `vmesh.rs` | **greedy meshing** par morceaux de 8³ : ~650 maillages fusionnés, couleurs aux sommets ; seuls les morceaux touchés sont reconstruits (8 par frame max) |
-| `rubble.rs` | blocs de gravats 2×2×2 persistants : gravité, rebonds, collisions bloc/bloc (grille spatiale), sommeil ; un bloc rétrécit à chaque voxel cassé |
-| `sledge.rs` | masse à trois temps (manche en bas à droite, tête au centre), son, secousse, gravats |
-| `weapon.rs` | Glock 17 (traçantes, recul, éclat de bouche) et C4 |
-| `fx.rs` | sons **synthétisés** (WAV encodé à la volée, aucun fichier), secousse de caméra, flashs |
-| `player.rs` | caméra FPS, collisions voxel + gravats, balancement de marche |
-| `perf.rs` | `AutoVsync` + boucle bornée à la fréquence de l'écran |
-| `net/` | protocole binaire maison, client, serveur anti-triche |
-
-## Performance
-
-Le passage d'« une entité par voxel » à « un maillage fusionné par morceau »
-a fait passer ~3 000 entités / ~3 000 draw calls à **650 maillages** avec la
-carte complète (105 714 voxels) : **239–247 FPS** sur une RTX 3060 en 1600×900,
-sol compris, avec des centaines de blocs de gravats en mouvement.
-
-## Tests
-
-`cargo test` vérifie l'encodage WAV des bruitages et le maillage fusionné
-(fusion de faces, plan de la face supérieure, morceau vide).
+| `world.rs` | grille 384 × 64 × 384 (bitset + 1 octet de matériau), rayon DDA, `carve`, `sweep` sans traversée ni téléportation |
+| `map.rs` | génération de la ville à partir de la seed |
+| `vmesh.rs` | greedy meshing par morceaux de 16³ (opaque + vitres translucides), file de reconstruction |
+| `rubble.rs` | blocs de gravats : chute, empilement, sommeil, réveil si le support disparaît |
+| `debris.rs` | petits éclats décoratifs |
+| `player.rs` | caméra FPS, collisions, marches, vol libre |
+| `weapon.rs` | les 13 armes : modèles en main, actions, bombes, explosions, souffle |
+| `game.rs` | modes, catalogue d'armes, inventaire, argent, réglages enregistrés |
+| `shop.rs` | boutique |
+| `menu.rs`, `hud.rs`, `ui.rs` | interface (police embarquée dans l'exécutable) |
+| `fx.rs` | sons synthétisés, secousse, flashs, boules de feu |
+| `net/` | protocole binaire, client, serveur (dédié ou hébergé dans le jeu) |
+| `installer/` | installateur multiplateforme qui embarque le jeu |

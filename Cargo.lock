@@ -2068,10 +2068,14 @@ dependencies = [
 
 [[package]]
 name = "boomground"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bevy",
 ]
+
+[[package]]
+name = "boomground-setup"
+version = "1.0.0"
 
 [[package]]
 name = "bumpalo"

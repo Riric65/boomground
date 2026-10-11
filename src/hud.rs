@@ -103,7 +103,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
         .insert(Node {
             position_type: PositionType::Absolute,
             right: px(16),
-            bottom: px(16),
+            bottom: px(84),
             padding: UiRect::all(px(12)),
             border_radius: BorderRadius::all(px(6.0)),
             ..default()

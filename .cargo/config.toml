@@ -1,8 +1,9 @@
-# 7.6 Go de RAM : limiter les rustc concurrents évite les OOM (SIGKILL) au build.
+# Limiter les rustc concurrents évite les OOM (SIGKILL) au build sur les
+# machines avec peu de RAM.
 [build]
-jobs = 4
+jobs = 6
 
-# Racine des assets : <racine du projet>/assets, même en lançant le binaire
-# directement (sinon Bevy cherche à côté de l'exécutable).
-[env]
-BEVY_ASSET_ROOT = { value = ".", relative = true }
+# Windows : runtime C intégré à l'exécutable (pas besoin d'installer
+# « Visual C++ Redistributable » chez le joueur).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

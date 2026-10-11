@@ -1,0 +1,12 @@
+[package]
+name = "boomground-setup"
+version = "1.0.0"
+edition = "2021"
+description = "Installateur de BoomGround (Windows, Linux, macOS)."
+build = "build.rs"
+
+[[bin]]
+name = "BoomGround-Setup"
+path = "src/main.rs"
+
+[dependencies]
