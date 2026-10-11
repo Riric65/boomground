@@ -64,9 +64,14 @@ pub fn overview(
 /// `BOOM_POS=x,z` (mètres).
 pub fn pose(
     mut frames: Local<u32>,
+    game: Res<GameState>,
     world: Res<crate::world::VoxelWorld>,
     mut player: Query<(&mut Transform, &mut crate::player::Body), With<crate::player::Player>>,
 ) {
+    // Appliquée quelques images après l'entrée en jeu (après le lobby).
+    if game.phase != Phase::Playing {
+        return;
+    }
     *frames += 1;
     if *frames != 3 {
         return;

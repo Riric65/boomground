@@ -16,6 +16,18 @@ use crate::weapon::{BombAssets, Destroyer};
 #[derive(Component)]
 pub struct RemotePlayer {
     pub id: u16,
+    /// Position de l'image précédente (vitesse pour l'animation de marche).
+    pub last: Vec3,
+    /// Phase du balancement des bras et des jambes.
+    pub stride: f32,
+}
+
+/// Bras ou jambe d'un joueur distant, pivotant à l'épaule / la hanche.
+#[derive(Component)]
+pub struct Limb {
+    /// +1 / -1 : les membres opposés se balancent à contretemps.
+    pub side: f32,
+    pub arm: bool,
 }
 
 /// Étiquette de nom (interface) qui suit un joueur distant.
@@ -220,6 +232,12 @@ pub fn send_state(
         return;
     }
     net.flush();
+    // Dans le lobby ou le menu, la caméra survole la ville : ce n'est pas
+    // la position du joueur, on ne l'envoie pas (sinon les autres le
+    // voyaient flotter dans le ciel).
+    if game.phase != crate::game::Phase::Playing {
+        return;
+    }
     *timer -= time.delta_secs();
     if *timer > 0.0 {
         return;
@@ -371,27 +389,42 @@ pub fn receive(
                             base_color: Color::srgb(0.12, 0.12, 0.14),
                             ..default()
                         });
-                        let torso = meshes.add(Cuboid::new(0.55, 0.75, 0.32));
-                        let head = meshes.add(Cuboid::new(0.36, 0.36, 0.36));
-                        let leg = meshes.add(Cuboid::new(0.22, 0.8, 0.24));
-                        let arm = meshes.add(Cuboid::new(0.16, 0.7, 0.18));
-                        let visor = meshes.add(Cuboid::new(0.28, 0.08, 0.02));
+                        // Personnage trapu et contrasté : lisible de face comme
+                        // de profil, même de loin.
+                        let torso = meshes.add(Cuboid::new(0.62, 0.78, 0.38));
+                        let head = meshes.add(Cuboid::new(0.44, 0.44, 0.44));
+                        let leg = meshes.add(Cuboid::new(0.27, 0.82, 0.32));
+                        let arm = meshes.add(Cuboid::new(0.2, 0.74, 0.24));
+                        let visor = meshes.add(Cuboid::new(0.34, 0.1, 0.03));
+                        let jeans = materials.add(StandardMaterial {
+                            base_color: Color::srgb(0.18, 0.24, 0.42),
+                            perceptual_roughness: 0.85,
+                            ..default()
+                        });
                         let _ = pitch;
                         d.commands
                             .spawn((
-                                RemotePlayer { id },
+                                RemotePlayer {
+                                    id,
+                                    last: pos,
+                                    stride: 0.0,
+                                },
                                 Transform::from_translation(pos).with_rotation(rotation),
                                 Visibility::default(),
                             ))
                             .with_children(|p| {
-                                p.spawn((Mesh3d(torso), MeshMaterial3d(body.clone()), Transform::from_xyz(0.0, 1.17, 0.0)));
-                                p.spawn((Mesh3d(head), MeshMaterial3d(skin), Transform::from_xyz(0.0, 1.74, 0.0)));
-                                p.spawn((Mesh3d(visor), MeshMaterial3d(dark.clone()), Transform::from_xyz(0.0, 1.78, -0.185)));
-                                for x in [-0.14, 0.14] {
-                                    p.spawn((Mesh3d(leg.clone()), MeshMaterial3d(dark.clone()), Transform::from_xyz(x, 0.4, 0.0)));
+                                p.spawn((Mesh3d(torso), MeshMaterial3d(body.clone()), Transform::from_xyz(0.0, 1.21, 0.0)));
+                                p.spawn((Mesh3d(head), MeshMaterial3d(skin), Transform::from_xyz(0.0, 1.84, 0.0)));
+                                p.spawn((Mesh3d(visor), MeshMaterial3d(dark.clone()), Transform::from_xyz(0.0, 1.88, -0.225)));
+                                // Jambes : pivot à la hanche.
+                                for (x, side) in [(-0.16, 1.0), (0.16, -1.0)] {
+                                    p.spawn((Limb { side, arm: false }, Transform::from_xyz(x, 0.82, 0.0), Visibility::default()))
+                                        .with_child((Mesh3d(leg.clone()), MeshMaterial3d(jeans.clone()), Transform::from_xyz(0.0, -0.41, 0.0)));
                                 }
-                                for x in [-0.36, 0.36] {
-                                    p.spawn((Mesh3d(arm.clone()), MeshMaterial3d(body.clone()), Transform::from_xyz(x, 1.15, 0.0)));
+                                // Bras : pivot à l'épaule.
+                                for (x, side) in [(-0.42, -1.0), (0.42, 1.0)] {
+                                    p.spawn((Limb { side, arm: true }, Transform::from_xyz(x, 1.56, 0.0), Visibility::default()))
+                                        .with_child((Mesh3d(arm.clone()), MeshMaterial3d(body.clone()), Transform::from_xyz(0.0, -0.36, 0.0)));
                                 }
                             });
                         let name = lobby
@@ -461,7 +494,7 @@ pub fn update_nametags(
     for (tag, mut node, mut visibility, mut text, computed) in &mut tags {
         let target = remotes.iter().find(|(r, _)| r.id == tag.id);
         let screen = target.and_then(|(_, t)| {
-            let head = t.translation() + Vec3::Y * 2.2;
+            let head = t.translation() + Vec3::Y * 2.35;
             let dist = head.distance(cam_transform.translation());
             if dist > 80.0 {
                 return None;
@@ -481,6 +514,32 @@ pub fn update_nametags(
         if let Some((_, name)) = lobby.players.iter().find(|(id, _)| *id == tag.id) {
             if text.0 != *name {
                 text.0 = name.clone();
+            }
+        }
+    }
+}
+
+/// Balancement des bras et des jambes des joueurs distants quand ils
+/// avancent.
+pub fn animate_remotes(
+    time: Res<Time>,
+    mut remotes: Query<(&mut RemotePlayer, &Transform, &Children)>,
+    mut limbs: Query<(&Limb, &mut Transform), Without<RemotePlayer>>,
+) {
+    let dt = time.delta_secs().max(1e-4);
+    for (mut remote, transform, children) in &mut remotes {
+        let moved = transform.translation - remote.last;
+        remote.last = transform.translation;
+        let speed = Vec2::new(moved.x, moved.z).length() / dt;
+        let amount = (speed / 5.0).min(1.0);
+        remote.stride += speed * dt * 1.8;
+        for child in children.iter() {
+            if let Ok((limb, mut t)) = limbs.get_mut(child) {
+                let swing = remote.stride.sin() * 0.7 * amount * limb.side;
+                let angle = if limb.arm { -swing * 0.8 } else { swing };
+                // Retour en douceur à la position de repos à l'arrêt.
+                let target = Quat::from_rotation_x(angle);
+                t.rotation = t.rotation.slerp(target, (dt * 12.0).min(1.0));
             }
         }
     }

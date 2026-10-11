@@ -1428,6 +1428,7 @@ pub fn cinematic_camera(
     time: Res<Time>,
     game: Res<GameState>,
     world: Res<VoxelWorld>,
+    net: Res<NetClient>,
     mut was_cinematic: Local<bool>,
     mut player: Query<(&mut Transform, &mut crate::player::Body), With<crate::player::Player>>,
     mut head: Query<&mut Transform, (With<crate::player::Head>, Without<crate::player::Player>)>,
@@ -1446,7 +1447,7 @@ pub fn cinematic_camera(
         t.rotation = Quat::from_rotation_y(body.yaw);
         h.rotation = Quat::from_rotation_x(body.pitch);
     } else if *was_cinematic {
-        t.translation = world.spawn;
+        t.translation = crate::player::spawn_point(&world, net.id);
         body.pitch = 0.0;
         body.fly = false;
         body.vel = Vec3::ZERO;

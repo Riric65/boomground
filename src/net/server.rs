@@ -126,6 +126,9 @@ struct Client {
     tokens: f32,
     last_refill: Instant,
     joined: bool,
+    /// Dernière position acceptée, et positions refusées d'affilée.
+    last_state: Instant,
+    rejected: u32,
     /// Connexion acceptée depuis moins de 10 s sans `Join` : on patiente.
     since: Instant,
 }
@@ -361,6 +364,8 @@ fn accept_clients(mut server: ResMut<ServerState>) {
                 tokens: BUCKET,
                 last_refill: Instant::now(),
                 joined: false,
+                last_state: Instant::now(),
+                rejected: 0,
                 since: Instant::now(),
             },
         );
@@ -619,11 +624,22 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
             weapon,
         } => {
             if let Some(c) = server.clients.get_mut(&id) {
-                // Anti-triche : pas de téléportation (le vol libre du bac à
-                // sable reste sous ~35 m/s ; 20 états par seconde).
-                if !c.placed || pos.distance(c.pos) <= 4.0 {
+                // Anti-triche : vitesse bornée (le vol libre du bac à sable
+                // reste sous ~35 m/s). Une position refusée en continu
+                // pendant une seconde est un vrai saut (réapparition,
+                // explosion) : on se recale dessus au lieu de bloquer le
+                // joueur pour toujours à son ancienne place.
+                let now = Instant::now();
+                let dt = now.duration_since(c.last_state).as_secs_f32().min(1.0);
+                let allowed = 4.0 + 45.0 * dt;
+                if !c.placed || pos.distance(c.pos) <= allowed || c.rejected >= 20 {
                     c.pos = pos;
                     c.placed = true;
+                    c.last_state = now;
+                    c.rejected = 0;
+                } else {
+                    c.rejected += 1;
+                    server.rejections += 1;
                 }
                 c.yaw = yaw;
                 c.pitch = pitch;

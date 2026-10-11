@@ -118,9 +118,23 @@ pub fn spawn_player(mut commands: Commands, world: Res<VoxelWorld>) {
     ));
 }
 
+/// Point d'apparition d'un joueur : autour du carrefour central, décalé
+/// selon son numéro pour que les joueurs en ligne n'apparaissent pas les uns
+/// dans les autres.
+pub fn spawn_point(world: &VoxelWorld, id: Option<u16>) -> Vec3 {
+    match id {
+        Some(id) if id > 0 => {
+            let a = id as f32 * 2.4;
+            world.spawn + Vec3::new(a.cos(), 0.0, a.sin()) * 1.8
+        }
+        _ => world.spawn,
+    }
+}
+
 /// Remet le joueur au point d'apparition quand la carte est régénérée.
 pub fn respawn_on_rebuild(
     world: Res<VoxelWorld>,
+    net: Res<crate::net::client::NetClient>,
     mut seen: Local<u32>,
     mut player: Query<(&mut Transform, &mut Body), With<Player>>,
 ) {
@@ -129,7 +143,7 @@ pub fn respawn_on_rebuild(
     }
     *seen = world.generation;
     if let Ok((mut t, mut body)) = player.single_mut() {
-        t.translation = world.spawn;
+        t.translation = spawn_point(&world, net.id);
         body.vel = Vec3::ZERO;
     }
 }
@@ -200,6 +214,7 @@ pub fn move_player(
     world: Res<VoxelWorld>,
     game: Res<crate::game::GameState>,
     shop: Res<crate::shop::ShopState>,
+    net: Res<crate::net::client::NetClient>,
     mut query: Query<(&mut Transform, &mut Body), With<Player>>,
     mut heads: Query<&mut Transform, (With<Head>, Without<Player>)>,
     mut blocks: Query<(&Transform, &mut Chunk), (Without<Player>, Without<Head>)>,
@@ -374,7 +389,7 @@ pub fn move_player(
 
     // Filet de sécurité : hors de la carte, on réapparaît.
     if pos.y < -10.0 || !world.in_bounds_xz(pos) {
-        pos = world.spawn;
+        pos = spawn_point(&world, net.id);
         body.vel = Vec3::ZERO;
     }
 

@@ -150,6 +150,7 @@ pub fn run() {
                 net::client::send_state,
                 net::client::receive,
                 net::client::update_nametags,
+                net::client::animate_remotes,
                 vmesh::refresh_chunks,
                 hud::update,
             )
