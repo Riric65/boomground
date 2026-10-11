@@ -36,6 +36,8 @@ pub enum Kind {
     Thrown,
     /// Posée sur une surface.
     Placed,
+    /// Outil de construction : pose des blocs.
+    Build,
 }
 
 /// Toutes les armes du jeu, dans l'ordre de la barre d'armes.
@@ -55,22 +57,34 @@ pub enum WeaponId {
     Dynamite,
     C4,
     MegaBomb,
+    Pickaxe,
+    Revolver,
+    Smg,
+    Minigun,
+    Railgun,
+    Blocks,
 }
 
-pub const ALL_WEAPONS: [WeaponId; 13] = [
+pub const ALL_WEAPONS: [WeaponId; 19] = [
     WeaponId::Hammer,
     WeaponId::Sledge,
     WeaponId::WarHammer,
+    WeaponId::Pickaxe,
     WeaponId::Jackhammer,
     WeaponId::Glock,
+    WeaponId::Revolver,
+    WeaponId::Smg,
     WeaponId::Shotgun,
     WeaponId::Rifle,
+    WeaponId::Minigun,
     WeaponId::Sniper,
+    WeaponId::Railgun,
     WeaponId::Rocket,
     WeaponId::Grenade,
     WeaponId::Dynamite,
     WeaponId::C4,
     WeaponId::MegaBomb,
+    WeaponId::Blocks,
 ];
 
 /// Caractéristiques d'une arme.
@@ -104,6 +118,8 @@ pub struct Spec {
     pub ammo_pack: u32,
     /// Munitions de réserve données à l'achat.
     pub starting_reserve: u32,
+    /// Dégâts infligés à un joueur (par coup, balle ou plomb).
+    pub damage: f32,
 }
 
 const BASE: Spec = Spec {
@@ -123,6 +139,7 @@ const BASE: Spec = Spec {
     ammo_price: 0,
     ammo_pack: 0,
     starting_reserve: 0,
+    damage: 0.0,
 };
 
 impl WeaponId {
@@ -130,6 +147,7 @@ impl WeaponId {
         use WeaponId::*;
         match self {
             Hammer => &Spec {
+                damage: 18.0,
                 name: "Marteau",
                 radius: 0.55,
                 reach: 3.5,
@@ -137,6 +155,7 @@ impl WeaponId {
                 ..BASE
             },
             Sledge => &Spec {
+                damage: 30.0,
                 name: "Masse",
                 price: 150,
                 radius: 0.9,
@@ -145,6 +164,7 @@ impl WeaponId {
                 ..BASE
             },
             WarHammer => &Spec {
+                damage: 55.0,
                 name: "Masse de guerre",
                 price: 1_200,
                 radius: 1.4,
@@ -153,6 +173,7 @@ impl WeaponId {
                 ..BASE
             },
             Jackhammer => &Spec {
+                damage: 6.0,
                 name: "Marteau-piqueur",
                 price: 2_500,
                 radius: 0.6,
@@ -162,6 +183,7 @@ impl WeaponId {
                 ..BASE
             },
             Glock => &Spec {
+                damage: 14.0,
                 name: "Glock 17",
                 kind: Kind::Gun,
                 price: 400,
@@ -176,6 +198,7 @@ impl WeaponId {
                 ..BASE
             },
             Shotgun => &Spec {
+                damage: 11.0,
                 name: "Fusil à pompe",
                 kind: Kind::Gun,
                 price: 1_200,
@@ -192,6 +215,7 @@ impl WeaponId {
                 ..BASE
             },
             Rifle => &Spec {
+                damage: 12.0,
                 name: "Fusil d'assaut",
                 kind: Kind::Gun,
                 price: 3_000,
@@ -208,6 +232,7 @@ impl WeaponId {
                 ..BASE
             },
             Sniper => &Spec {
+                damage: 95.0,
                 name: "Sniper .50",
                 kind: Kind::Gun,
                 price: 4_500,
@@ -234,6 +259,88 @@ impl WeaponId {
                 ammo_price: 150,
                 ammo_pack: 3,
                 starting_reserve: 4,
+                ..BASE
+            },
+            Pickaxe => &Spec {
+                name: "Pioche",
+                price: 600,
+                radius: 0.75,
+                reach: 4.2,
+                cooldown: 0.28,
+                damage: 24.0,
+                ..BASE
+            },
+            Revolver => &Spec {
+                name: "Revolver .44",
+                kind: Kind::Gun,
+                price: 900,
+                radius: 0.55,
+                reach: 90.0,
+                cooldown: 0.5,
+                mag: 6,
+                reload: 1.9,
+                ammo_price: 35,
+                ammo_pack: 12,
+                starting_reserve: 24,
+                damage: 45.0,
+                ..BASE
+            },
+            Smg => &Spec {
+                name: "Pistolet-mitrailleur",
+                kind: Kind::Gun,
+                price: 1_800,
+                radius: 0.30,
+                reach: 70.0,
+                cooldown: 0.055,
+                auto: true,
+                mag: 40,
+                spread: 0.03,
+                reload: 1.4,
+                ammo_price: 50,
+                ammo_pack: 80,
+                starting_reserve: 120,
+                damage: 9.0,
+                ..BASE
+            },
+            Minigun => &Spec {
+                name: "Minigun",
+                kind: Kind::Gun,
+                price: 12_000,
+                radius: 0.38,
+                reach: 90.0,
+                cooldown: 0.035,
+                auto: true,
+                mag: 150,
+                spread: 0.05,
+                reload: 3.5,
+                ammo_price: 120,
+                ammo_pack: 150,
+                starting_reserve: 300,
+                damage: 8.0,
+                ..BASE
+            },
+            Railgun => &Spec {
+                name: "Railgun",
+                kind: Kind::Gun,
+                price: 15_000,
+                radius: 0.7,
+                reach: 220.0,
+                cooldown: 1.4,
+                mag: 4,
+                pierce: 16,
+                reload: 2.5,
+                ammo_price: 200,
+                ammo_pack: 4,
+                starting_reserve: 8,
+                damage: 100.0,
+                ..BASE
+            },
+            Blocks => &Spec {
+                name: "Blocs",
+                kind: Kind::Build,
+                reach: 9.0,
+                cooldown: 0.12,
+                auto: true,
                 ..BASE
             },
             Grenade => &Spec {
@@ -319,6 +426,22 @@ pub struct GameState {
     pub seed: u64,
     /// Une partie a déjà été lancée (le menu propose « reprendre »).
     pub started: bool,
+    /// Points de vie (0..=100).
+    pub hp: f32,
+    /// Mort : ragdoll et caméra à la troisième personne jusqu'à la
+    /// réapparition.
+    pub dead: bool,
+    /// Secondes restantes avant la réapparition.
+    pub respawn_in: f32,
+    /// Matériau choisi pour l'outil de construction (indice dans
+    /// `world::mat::BUILD`).
+    pub build_index: usize,
+    /// Les dégâts sont actifs (explosions en solo).
+    pub hurt_enabled: bool,
+    /// Poussée subie à la mort (le ragdoll est lancé avec).
+    pub death_push: Vec3,
+    /// Réapparition demandée à cette position.
+    pub respawn_at: Option<Vec3>,
 }
 
 impl Default for GameState {
@@ -332,15 +455,37 @@ impl Default for GameState {
             earned: 0,
             seed: 0,
             started: false,
+            hp: MAX_HP,
+            dead: false,
+            respawn_in: 0.0,
+            build_index: 0,
+            hurt_enabled: true,
+            death_push: Vec3::ZERO,
+            respawn_at: None,
         };
         s.reset_inventory();
         s
     }
 }
 
+/// Points de vie maximum.
+pub const MAX_HP: f32 = 100.0;
+/// Temps avant la réapparition (secondes).
+pub const RESPAWN_TIME: f32 = 5.0;
+
 impl GameState {
     pub fn in_game(&self) -> bool {
         self.phase == Phase::Playing
+    }
+
+    /// En jeu et vivant : peut agir.
+    pub fn alive(&self) -> bool {
+        self.phase == Phase::Playing && !self.dead
+    }
+
+    /// Matériau actuel de l'outil de construction.
+    pub fn build_material(&self) -> u8 {
+        crate::world::mat::BUILD[self.build_index % crate::world::mat::BUILD.len()]
     }
 
     pub fn sandbox(&self) -> bool {
@@ -368,9 +513,12 @@ impl GameState {
     pub fn reset_inventory(&mut self) {
         self.money = 0;
         self.earned = 0;
+        self.hp = MAX_HP;
+        self.dead = false;
+        self.respawn_at = None;
         for &id in &ALL_WEAPONS {
             let spec = id.spec();
-            let owned = self.sandbox() || id == WeaponId::Hammer;
+            let owned = self.sandbox() || matches!(id, WeaponId::Hammer | WeaponId::Blocks);
             *self.slot_mut(id) = Slot {
                 owned,
                 mag: if owned { spec.mag } else { 0 },
@@ -469,6 +617,20 @@ pub struct Settings {
     pub fullscreen: bool,
     /// Champ de vision (degrés).
     pub fov: f32,
+    /// Distance d'affichage (mètres) : brouillard et plan lointain.
+    pub view_distance: f32,
+    /// Qualité des ombres : 0 aucune, 1 moyenne, 2 haute.
+    pub shadows: u8,
+    /// Intensité des secousses de caméra (0..1).
+    pub shake: f32,
+    /// Affiche le compteur d'images par seconde.
+    pub show_fps: bool,
+    /// Affiche le viseur.
+    pub crosshair: bool,
+    /// Balancement de la caméra à la marche.
+    pub head_bob: bool,
+    /// Volume des bruitages (en plus du volume général).
+    pub sfx: f32,
 }
 
 impl Default for Settings {
@@ -481,6 +643,13 @@ impl Default for Settings {
             invert_y: false,
             fullscreen: false,
             fov: 75.0,
+            view_distance: 260.0,
+            shadows: 2,
+            shake: 1.0,
+            show_fps: false,
+            crosshair: true,
+            head_bob: true,
+            sfx: 1.0,
         }
     }
 }
@@ -503,6 +672,10 @@ impl Settings {
             self.fps_limit = self.fps_limit.clamp(30.0, 360.0);
         }
         self.fov = self.fov.clamp(60.0, 110.0);
+        self.view_distance = self.view_distance.clamp(80.0, 600.0);
+        self.shadows = self.shadows.min(2);
+        self.shake = self.shake.clamp(0.0, 1.0);
+        self.sfx = self.sfx.clamp(0.0, 1.0);
         self.name = self.name.chars().filter(|c| !c.is_control()).take(16).collect();
         if self.name.trim().is_empty() {
             self.name = default_name();
@@ -537,8 +710,28 @@ fps_limit={}
 invert_y={}
 fullscreen={}
 fov={}
+view_distance={}
+shadows={}
+shake={}
+show_fps={}
+crosshair={}
+head_bob={}
+sfx={}
 ",
-        s.name, s.sensitivity, s.volume, s.fps_limit, s.invert_y, s.fullscreen, s.fov
+        s.name,
+        s.sensitivity,
+        s.volume,
+        s.fps_limit,
+        s.invert_y,
+        s.fullscreen,
+        s.fov,
+        s.view_distance,
+        s.shadows,
+        s.shake,
+        s.show_fps,
+        s.crosshair,
+        s.head_bob,
+        s.sfx
     );
     let _ = std::fs::write(dir.join("settings.txt"), body);
 }
@@ -563,6 +756,13 @@ pub fn load_settings() -> Settings {
             "invert_y" => s.invert_y = v == "true",
             "fullscreen" => s.fullscreen = v == "true",
             "fov" => s.fov = v.parse().unwrap_or(s.fov),
+            "view_distance" => s.view_distance = v.parse().unwrap_or(s.view_distance),
+            "shadows" => s.shadows = v.parse().unwrap_or(s.shadows),
+            "shake" => s.shake = v.parse().unwrap_or(s.shake),
+            "show_fps" => s.show_fps = v == "true",
+            "crosshair" => s.crosshair = v == "true",
+            "head_bob" => s.head_bob = v == "true",
+            "sfx" => s.sfx = v.parse().unwrap_or(s.sfx),
             _ => {}
         }
     }
@@ -612,13 +812,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normal_mode_starts_with_hammer_only() {
+    fn normal_mode_starts_with_hammer_and_blocks() {
         let mut g = GameState {
             mode: Mode::Normal,
             ..default()
         };
         g.reset_inventory();
-        assert_eq!(g.owned(), vec![WeaponId::Hammer]);
+        assert_eq!(g.owned(), vec![WeaponId::Hammer, WeaponId::Blocks]);
         assert!(g.buy(WeaponId::Sledge).is_err());
         g.money = 1000;
         assert!(g.buy(WeaponId::Sledge).is_ok());

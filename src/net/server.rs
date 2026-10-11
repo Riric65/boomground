@@ -27,11 +27,12 @@ use bevy::prelude::*;
 use crate::game::{random_seed, WeaponId, ALL_WEAPONS};
 use crate::net::lan::{LobbyInfo, Responder};
 use crate::net::protocol::{
-    read_into, FrameReader, HitKind, Packet, DEFAULT_PORT, MAX_CELLS_PER_PACKET, MAX_PLAYERS,
-    PROTOCOL_VERSION,
+    read_into, FrameReader, HitKind, Packet, DEFAULT_PORT, MAX_CELLS_PER_PACKET,
+    MAX_PLACED_PER_PACKET, MAX_PLAYERS, PROTOCOL_VERSION,
 };
 use crate::net::upnp;
 use crate::world::VoxelWorld;
+use bevy::math::IVec3;
 
 /// Distance maximale entre le joueur connu et l'origine d'un tir.
 const MAX_ORIGIN_DRIFT: f32 = 6.0;
@@ -44,9 +45,34 @@ const REFILL_PER_SEC: f32 = 30.0;
 /// Coupure si le client ne lit plus (tampon d'envoi trop gros).
 const MAX_OUTBOX: usize = 8 << 20;
 
+/// Règles d'une partie (modifiables dans `server.conf`).
+#[derive(Clone, Debug)]
+pub struct Rules {
+    /// Nombre maximal de joueurs (1..=16).
+    pub max_players: usize,
+    /// Les joueurs peuvent se blesser entre eux.
+    pub pvp: bool,
+    /// Multiplicateur de dégâts (0 = invulnérable).
+    pub damage_scale: f32,
+    /// Secondes avant la réapparition.
+    pub respawn: f32,
+}
+
+impl Default for Rules {
+    fn default() -> Self {
+        Self {
+            max_players: MAX_PLAYERS,
+            pvp: true,
+            damage_scale: 1.0,
+            respawn: crate::game::RESPAWN_TIME,
+        }
+    }
+}
+
 /// Réglages d'une partie hébergée.
 #[derive(Clone, Debug)]
 pub struct HostConfig {
+    pub rules: Rules,
     pub seed: u64,
     /// 0 = bac à sable, 1 = normal.
     pub mode: u8,
@@ -131,6 +157,9 @@ struct Client {
     rejected: u32,
     /// Connexion acceptée depuis moins de 10 s sans `Join` : on patiente.
     since: Instant,
+    hp: f32,
+    /// Mort : réapparition à cette date.
+    dead_until: Option<Instant>,
 }
 
 impl Client {
@@ -164,8 +193,9 @@ struct ServerState {
     config: HostConfig,
     started: bool,
     host: Option<u16>,
-    /// Tous les voxels détruits depuis le début (pour les retardataires).
-    history: Vec<[u16; 3]>,
+    /// Toutes les modifications du monde depuis le début, dans l'ordre
+    /// `[x, y, z, matériau]` (255 = voxel retiré), pour les retardataires.
+    history: Vec<[u16; 4]>,
     rejections: u32,
     last_log: f32,
     last_snapshot: f32,
@@ -231,14 +261,130 @@ fn server_app(listeners: Vec<TcpListener>, port: u16, config: HostConfig, shutdo
     app
 }
 
-/// Serveur dédié (`BoomGround --server`).
+/// Contenu du `server.conf` généré au premier lancement.
+const CONF_TEMPLATE: &str = "\
+# BoomGround — configuration du serveur dédié
+# Modifie ce fichier puis relance le serveur. Les lignes qui commencent par
+# # sont des commentaires. Supprime le fichier pour le régénérer.
+
+# Nom affiché dans la liste des parties (réseau local).
+name = Serveur BoomGround
+
+# Port TCP d'écoute (ouvre-le sur ta box / ton pare-feu pour jouer en ligne).
+port = 28431
+
+# Graine de la ville : un nombre, un mot, ou « random » (nouvelle ville à
+# chaque démarrage).
+seed = random
+
+# Mode de jeu : sandbox (tout débloqué) ou normal (argent et boutique).
+mode = sandbox
+
+# Nombre maximal de joueurs (1 à 16).
+max_players = 16
+
+# Les joueurs peuvent se blesser entre eux (true / false). Les explosions
+# restent dangereuses pour leur auteur.
+pvp = true
+
+# Multiplicateur de dégâts : 1 = normal, 0 = invulnérable, 2 = double.
+damage_scale = 1.0
+
+# Secondes avant la réapparition d'un joueur mort.
+respawn_seconds = 5
+";
+
+/// Réglages lus dans `server.conf`.
+struct ServerConf {
+    name: String,
+    port: u16,
+    seed: Option<u64>,
+    mode: u8,
+    rules: Rules,
+}
+
+/// Emplacement du fichier : à côté de l'exécutable (sinon dossier courant).
+fn conf_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("server.conf")))
+        .unwrap_or_else(|| "server.conf".into())
+}
+
+/// Lit `server.conf` (le crée s'il n'existe pas).
+fn load_conf() -> ServerConf {
+    let path = conf_path();
+    if !path.exists() {
+        match std::fs::write(&path, CONF_TEMPLATE) {
+            Ok(()) => println!("server.conf créé : {}", path.display()),
+            Err(e) => eprintln!("impossible de créer {} : {e}", path.display()),
+        }
+    }
+    let mut conf = ServerConf {
+        name: "Serveur BoomGround".into(),
+        port: DEFAULT_PORT,
+        seed: None,
+        mode: 0,
+        rules: Rules::default(),
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return conf;
+    };
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            eprintln!("server.conf ligne {} ignorée : {line}", n + 1);
+            continue;
+        };
+        let (key, value) = (key.trim().to_lowercase(), value.trim());
+        match key.as_str() {
+            "name" if !value.is_empty() => conf.name = value.chars().take(40).collect(),
+            "port" => conf.port = value.parse().unwrap_or(conf.port),
+            "seed" => {
+                conf.seed = if value.eq_ignore_ascii_case("random") {
+                    None
+                } else {
+                    crate::game::parse_seed(value)
+                }
+            }
+            "mode" => conf.mode = u8::from(value.eq_ignore_ascii_case("normal")),
+            "max_players" => {
+                conf.rules.max_players = value.parse().unwrap_or(conf.rules.max_players).clamp(1, MAX_PLAYERS)
+            }
+            "pvp" => conf.rules.pvp = !value.eq_ignore_ascii_case("false"),
+            "damage_scale" => {
+                conf.rules.damage_scale = value.parse().unwrap_or(conf.rules.damage_scale).clamp(0.0, 10.0)
+            }
+            "respawn_seconds" => {
+                conf.rules.respawn = value.parse().unwrap_or(conf.rules.respawn).clamp(1.0, 60.0)
+            }
+            other => eprintln!("server.conf : clé inconnue « {other} »"),
+        }
+    }
+    conf
+}
+
+/// Serveur dédié (`boomground-server`, ou `BoomGround --server`). Les
+/// variables `BOOM_PORT`, `BOOM_SEED`, `BOOM_MODE` et `BOOM_NAME` priment
+/// sur `server.conf`.
 pub fn run_dedicated() {
+    let conf = load_conf();
     let seed = std::env::var("BOOM_SEED")
         .ok()
         .and_then(|v| crate::game::parse_seed(&v))
+        .or(conf.seed)
         .unwrap_or_else(random_seed);
-    let mode = if std::env::var("BOOM_MODE").is_ok_and(|m| m == "normal") { 1 } else { 0 };
-    let port = env_port();
+    let mode = match std::env::var("BOOM_MODE") {
+        Ok(m) => u8::from(m == "normal"),
+        Err(_) => conf.mode,
+    };
+    let port = std::env::var("BOOM_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(conf.port);
     let listeners = match bind(port) {
         Ok(v) => v,
         Err(e) => {
@@ -246,11 +392,19 @@ pub fn run_dedicated() {
             std::process::exit(1);
         }
     };
-    println!("BoomGround — serveur dédié, port {port}, seed {seed}");
+    let name = std::env::var("BOOM_NAME").unwrap_or(conf.name);
+    println!(
+        "BoomGround — serveur dédié « {name} » : port {port}, seed {seed}, mode {}, {} joueurs max, pvp {}",
+        if mode == 1 { "normal" } else { "bac à sable" },
+        conf.rules.max_players,
+        conf.rules.pvp
+    );
+    println!("Génération de la ville…");
     let config = HostConfig {
+        rules: conf.rules,
         seed,
         mode,
-        name: std::env::var("BOOM_NAME").unwrap_or_else(|_| "Serveur BoomGround".into()),
+        name,
         token: 0,
         dedicated: true,
     };
@@ -270,6 +424,7 @@ pub fn host_in_background(seed: u64, mode: u8, name: String) -> Result<HostHandl
     }));
 
     let config = HostConfig {
+        rules: Rules::default(),
         seed,
         mode,
         name,
@@ -367,6 +522,8 @@ fn accept_clients(mut server: ResMut<ServerState>) {
                 last_state: Instant::now(),
                 rejected: 0,
                 since: Instant::now(),
+                hp: 100.0,
+                dead_until: None,
             },
         );
     }
@@ -382,6 +539,24 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
             server.world.alive,
             server.rejections
         );
+    }
+
+    // Réapparitions.
+    let due: Vec<u16> = server
+        .clients
+        .iter()
+        .filter(|(_, c)| c.dead_until.is_some_and(|t| Instant::now() >= t))
+        .map(|(&id, _)| id)
+        .collect();
+    for id in due {
+        let pos = crate::player::spawn_point(&server.world, Some(id));
+        if let Some(c) = server.clients.get_mut(&id) {
+            c.hp = 100.0;
+            c.dead_until = None;
+            c.pos = pos;
+            c.last_state = Instant::now();
+        }
+        broadcast(&mut server, None, &Packet::Respawned { id, pos });
     }
 
     // Réponse aux menus du réseau local.
@@ -403,7 +578,9 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
             let snapshot: Vec<Vec<u8>> = server
                 .clients
                 .iter()
-                .filter(|(&other, c)| other != id && c.joined && c.placed)
+                .filter(|(&other, c)| {
+                    other != id && c.joined && c.placed && c.dead_until.is_none()
+                })
                 .map(|(&other, c)| {
                     Packet::Player {
                         id: other,
@@ -523,10 +700,112 @@ fn max_blast(kind: HitKind) -> f32 {
         .fold(0.0, f32::max)
 }
 
+/// Distance d'entrée du rayon dans la boîte d'un joueur (pieds en `feet`).
+fn ray_box(origin: Vec3, dir: Vec3, feet: Vec3, max: f32) -> Option<f32> {
+    let lo = feet + Vec3::new(-0.35, 0.0, -0.35);
+    let hi = feet + Vec3::new(0.35, 1.8, 0.35);
+    let mut t0 = 0.0f32;
+    let mut t1 = max;
+    for a in 0..3 {
+        if dir[a].abs() < 1e-6 {
+            if origin[a] < lo[a] || origin[a] > hi[a] {
+                return None;
+            }
+        } else {
+            let (mut n, mut f) = ((lo[a] - origin[a]) / dir[a], (hi[a] - origin[a]) / dir[a]);
+            if n > f {
+                std::mem::swap(&mut n, &mut f);
+            }
+            t0 = t0.max(n);
+            t1 = t1.min(f);
+            if t0 > t1 {
+                return None;
+            }
+        }
+    }
+    Some(t0)
+}
+
+/// Inflige des dégâts à un joueur ; le tue si ses points de vie tombent à 0.
+fn hurt(server: &mut ServerState, victim: u16, by: Option<u16>, amount: f32, from: Vec3, push: Vec3) {
+    let rules = server.config.rules.clone();
+    if !rules.pvp && by != Some(victim) {
+        return;
+    }
+    let amount = amount * rules.damage_scale;
+    if amount <= 0.0 {
+        return;
+    }
+    let Some(c) = server.clients.get_mut(&victim) else {
+        return;
+    };
+    if c.dead_until.is_some() {
+        return;
+    }
+    c.hp = (c.hp - amount).max(0.0);
+    let hp = c.hp;
+    let at = c.pos;
+    let dead = hp <= 0.0;
+    if dead {
+        c.dead_until = Some(Instant::now() + Duration::from_secs_f32(rules.respawn.max(1.0)));
+    }
+    send(server, victim, &Packet::Hurt { hp: hp.ceil() as u8, from });
+    if dead {
+        info!("#{victim} est mort (par {by:?})");
+        broadcast(server, None, &Packet::Died { id: victim, at, push });
+    }
+}
+
+/// Dégâts d'une explosion : décroissent avec la distance.
+fn explosion_damage(server: &mut ServerState, by: u16, center: Vec3, radius: f32) {
+    let reach = radius * 2.2 + 1.0;
+    let victims: Vec<(u16, Vec3)> = server
+        .clients
+        .iter()
+        .filter(|(_, c)| c.joined && c.placed && c.dead_until.is_none())
+        .map(|(&id, c)| (id, c.pos + Vec3::Y * 0.9))
+        .collect();
+    for (victim, pos) in victims {
+        let d = pos.distance(center);
+        if d >= reach {
+            continue;
+        }
+        let amount = 150.0 * (1.0 - d / reach).powf(1.2);
+        let away = (pos - center).normalize_or_zero();
+        hurt(server, victim, Some(by), amount, center, away * (6.0 + radius * 2.0) + Vec3::Y * 5.0);
+    }
+}
+
+/// Historique → paquets (suites de retraits `Voxels`, suites de poses
+/// `Placed`, dans l'ordre).
+fn encode_history(history: &[[u16; 4]]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < history.len() {
+        let removing = history[i][3] == 255;
+        let mut j = i;
+        while j < history.len() && (history[j][3] == 255) == removing {
+            j += 1;
+        }
+        if removing {
+            for chunk in history[i..j].chunks(MAX_CELLS_PER_PACKET) {
+                let cells = chunk.iter().map(|c| [c[0], c[1], c[2]]).collect();
+                out.push(Packet::Voxels { cells, rubble: false }.encode());
+            }
+        } else {
+            for chunk in history[i..j].chunks(MAX_PLACED_PER_PACKET) {
+                out.push(Packet::Placed { cells: chunk.to_vec() }.encode());
+            }
+        }
+        i = j;
+    }
+    out
+}
+
 fn max_reach(kind: HitKind) -> f32 {
     match kind {
         HitKind::Sledge => 5.5,
-        HitKind::Bullet => 170.0,
+        HitKind::Bullet => 230.0,
         HitKind::Explosion => 0.0,
     }
 }
@@ -559,7 +838,7 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
                 return;
             }
             let joined = server.clients.values().filter(|c| c.joined).count();
-            if joined >= MAX_PLAYERS {
+            if joined >= server.config.rules.max_players.clamp(1, MAX_PLAYERS) {
                 send(server, id, &Packet::Refused { reason: "la partie est pleine".into() });
                 return;
             }
@@ -588,22 +867,20 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
                 mode: server.config.mode,
                 started: server.started,
             };
-            let history: Vec<Vec<u8>> = server
-                .history
-                .chunks(MAX_CELLS_PER_PACKET)
-                .map(|cells| {
-                    Packet::Voxels {
-                        cells: cells.to_vec(),
-                        rubble: false,
-                    }
-                    .encode()
-                })
+            let history = encode_history(&server.history);
+            let doors: Vec<Vec<u8>> = server
+                .world
+                .doors
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.is_open)
+                .map(|(i, _)| Packet::DoorState { door: i as u16, open: true }.encode())
                 .collect();
             if let Some(c) = server.clients.get_mut(&id) {
                 c.name = unique.clone();
                 c.joined = true;
                 c.queue(&welcome.encode());
-                for data in &history {
+                for data in history.iter().chain(&doors) {
                     c.queue(data);
                 }
             }
@@ -624,6 +901,9 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
             weapon,
         } => {
             if let Some(c) = server.clients.get_mut(&id) {
+                if c.dead_until.is_some() {
+                    return;
+                }
                 // Anti-triche : vitesse bornée (le vol libre du bac à sable
                 // reste sous ~35 m/s). Une position refusée en continu
                 // pendant une seconde est un vrai saut (réapparition,
@@ -659,11 +939,16 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
                 return;
             };
             let cost = if kind == HitKind::Explosion { 4.0 } else { 1.0 };
-            if !client.placed || !client.joined || !take_token(client, cost) {
+            if !client.placed
+                || !client.joined
+                || client.dead_until.is_some()
+                || !take_token(client, cost)
+            {
                 server.rejections += 1;
                 return;
             }
             let player = client.pos + Vec3::Y * 1.6;
+            let weapon = WeaponId::from_tag(client.weapon);
             let blast = blast.clamp(0.05, max_blast(kind));
 
             let center = if kind == HitKind::Explosion {
@@ -679,22 +964,52 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
                     server.rejections += 1;
                     return;
                 }
-                match server.world.raycast(origin, dir, max_reach(kind)) {
+                let reach = max_reach(kind);
+                let world_hit = server.world.raycast(origin, dir, reach);
+                let limit = world_hit.as_ref().map_or(reach, |h| h.point.distance(origin));
+                // Un joueur sur la trajectoire est blessé.
+                let dmg = weapon.spec().damage;
+                if dmg > 0.0 {
+                    let dir_n = dir.normalize_or_zero();
+                    let target = server
+                        .clients
+                        .iter()
+                        .filter(|(&other, c)| {
+                            other != id && c.joined && c.placed && c.dead_until.is_none()
+                        })
+                        .filter_map(|(&other, c)| {
+                            ray_box(origin, dir_n, c.pos, limit.min(if kind == HitKind::Sledge { 3.5 } else { reach }))
+                                .map(|t| (other, t))
+                        })
+                        .min_by(|a, b| a.1.total_cmp(&b.1));
+                    if let Some((victim, _)) = target {
+                        hurt(server, victim, Some(id), dmg, origin, dir_n * 4.0);
+                    }
+                }
+                match world_hit {
                     Some(hit) => hit.point,
                     None => {
-                        server.rejections += 1;
+                        if dmg <= 0.0 {
+                            server.rejections += 1;
+                        }
                         return;
                     }
                 }
             };
 
-            let destroyed = server.world.carve(center, blast);
+            let mut destroyed = server.world.carve(center, blast);
+            if !destroyed.is_empty() {
+                let fallen = server.world.collapse(&destroyed);
+                destroyed.extend(fallen);
+            }
             if !destroyed.is_empty() {
                 let cells: Vec<[u16; 3]> = destroyed
                     .iter()
                     .map(|c| [c.x as u16, c.y as u16, c.z as u16])
                     .collect();
-                server.history.extend_from_slice(&cells);
+                server
+                    .history
+                    .extend(cells.iter().map(|c| [c[0], c[1], c[2], 255]));
                 for chunk in cells.chunks(MAX_CELLS_PER_PACKET) {
                     broadcast(
                         server,
@@ -708,6 +1023,60 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
             }
             if kind == HitKind::Explosion {
                 broadcast(server, Some(id), &Packet::Explode { at: center, radius: blast });
+                explosion_damage(server, id, center, blast);
+            }
+        }
+        Packet::Place { cell, material } => {
+            if !server.started {
+                return;
+            }
+            let Some(client) = server.clients.get_mut(&id) else {
+                return;
+            };
+            if !client.placed || !client.joined || client.dead_until.is_some() || !take_token(client, 1.0) {
+                server.rejections += 1;
+                return;
+            }
+            let at = IVec3::new(cell[0] as i32, cell[1] as i32, cell[2] as i32);
+            let center = server.world.cell_center(at);
+            let near = center.distance(client.pos + Vec3::Y * 1.6) <= 14.0;
+            let d = server.world.dims;
+            let inside = at.y >= 1 && at.cmpge(IVec3::ZERO).all() && at.cmplt(d).all();
+            if !near || !inside || server.world.is_solid(at) || material as usize >= crate::world::PALETTE.len() {
+                server.rejections += 1;
+                return;
+            }
+            server.world.set(at, true, material);
+            let edit = [cell[0], cell[1], cell[2], material as u16];
+            server.history.push(edit);
+            broadcast(server, None, &Packet::Placed { cells: vec![edit] });
+        }
+        Packet::Interact { door } => {
+            if !server.started {
+                return;
+            }
+            let Some(client) = server.clients.get_mut(&id) else {
+                return;
+            };
+            if !client.placed || !client.joined || client.dead_until.is_some() || !take_token(client, 2.0) {
+                return;
+            }
+            let pos = client.pos + Vec3::Y * 1.6;
+            let index = door as usize;
+            let Some(d) = server.world.doors.get(index) else {
+                return;
+            };
+            if d.center(&server.world).distance(pos) > 7.0 {
+                server.rejections += 1;
+                return;
+            }
+            if let Some(edits) = server.world.toggle_door(index) {
+                server.history.extend_from_slice(&edits);
+                let open = server.world.doors[index].is_open;
+                for chunk in edits.chunks(MAX_PLACED_PER_PACKET) {
+                    broadcast(server, None, &Packet::Placed { cells: chunk.to_vec() });
+                }
+                broadcast(server, None, &Packet::DoorState { door, open });
             }
         }
         Packet::BombPlaced { at, weapon } => {

@@ -197,7 +197,19 @@ pub fn setup_sounds(mut commands: Commands, mut assets: ResMut<Assets<AudioSourc
 
 /// Joue un effet **en 3D** : le son est positionné dans la scène, donc on
 /// l'entend à droite/gauche selon la caméra et plus loin quand on s'éloigne.
+static SFX_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// Volume des bruitages (réglage), 0..1.
+pub fn set_sfx_scale(v: f32) {
+    SFX_SCALE.store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn sfx_scale() -> f32 {
+    f32::from_bits(SFX_SCALE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 pub fn play_at(commands: &mut Commands, bank: &SfxBank, kind: SfxKind, volume: f32, at: Vec3) {
+    let volume = volume * sfx_scale();
     let Some(handle) = bank.get(kind) else { return };
     commands.spawn((
         AudioPlayer(handle),
@@ -212,6 +224,7 @@ pub fn play_at(commands: &mut Commands, bank: &SfxBank, kind: SfxKind, volume: f
 
 /// Variante 2D (interface).
 pub fn play(commands: &mut Commands, bank: &SfxBank, kind: SfxKind, volume: f32) {
+    let volume = volume * sfx_scale();
     let Some(handle) = bank.get(kind) else { return };
     commands.spawn((
         AudioPlayer(handle),
@@ -245,6 +258,7 @@ pub struct ShakeNoise(pub u32);
 /// Applique la secousse à la caméra, par-dessus le regard du joueur.
 pub fn apply_shake(
     time: Res<Time>,
+    settings: Res<crate::game::Settings>,
     mut shake: ResMut<Shake>,
     mut noise: ResMut<ShakeNoise>,
     mut cameras: Query<
@@ -263,7 +277,7 @@ pub fn apply_shake(
         camera.rotation = Quat::IDENTITY;
         return;
     }
-    let amount = shake.trauma * shake.trauma * 0.06;
+    let amount = shake.trauma * shake.trauma * 0.06 * settings.shake;
     let t = time.elapsed_secs();
     noise.0 = noise.0.wrapping_mul(1_103_515_245).wrapping_add(12_345);
     let a = ((noise.0 >> 16) & 0x7FFF) as f32 / 16_384.0 - 1.0;

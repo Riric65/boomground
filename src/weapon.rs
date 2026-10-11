@@ -75,6 +75,7 @@ impl Destroyer<'_, '_> {
             radius,
             debris,
             normal * 3.0,
+            !self.net.is_online(),
         );
         self.game.reward(d.value);
         if d.glass {
@@ -103,6 +104,7 @@ impl Destroyer<'_, '_> {
             radius,
             40,
             Vec3::Y * (2.0 + radius),
+            !self.net.is_online(),
         );
         self.game.reward(d.value);
         self.effects(at, radius);
@@ -402,6 +404,68 @@ pub fn setup_viewmodels(
                 p.spawn(part(&cube(&mut meshes, 0.015, 0.012, 0.015), &led, Transform::from_xyz(-0.04, 0.032, -0.02)));
             });
 
+        // --- Pioche ---
+        let base = melee_base(0.32, -0.44, -0.50);
+        p.spawn((ViewModel { id: WeaponId::Pickaxe, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
+            .with_children(|p| {
+                p.spawn(part(&cyl(&mut meshes, 0.02, 0.56), &wood, Transform::from_xyz(0.0, 0.26, 0.0)));
+                p.spawn(part(&cube(&mut meshes, 0.03, 0.04, 0.34), &steel, Transform::from_xyz(0.0, 0.54, 0.0)));
+                p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.08), &steel, Transform::from_xyz(0.0, 0.54, -0.20).with_rotation(Quat::from_rotation_x(0.5))));
+                p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.08), &steel, Transform::from_xyz(0.0, 0.54, 0.20).with_rotation(Quat::from_rotation_x(-0.5))));
+            });
+
+        // --- Revolver .44 ---
+        let base = Transform::from_xyz(0.2, -0.2, -0.38);
+        p.spawn((ViewModel { id: WeaponId::Revolver, base, muzzle: Vec3::new(0.2, -0.16, -0.78) }, base, Visibility::Hidden))
+            .with_children(|p| {
+                p.spawn(part(&cyl(&mut meshes, 0.014, 0.30), &steel, Transform::from_xyz(0.0, 0.03, -0.20).with_rotation(along_z)));
+                p.spawn(part(&cyl(&mut meshes, 0.04, 0.09), &dark, Transform::from_xyz(0.0, 0.02, -0.03).with_rotation(along_z)));
+                p.spawn(part(&cube(&mut meshes, 0.035, 0.11, 0.06), &wood, Transform::from_xyz(0.0, -0.07, 0.05).with_rotation(Quat::from_rotation_x(-0.3))));
+                p.spawn(part(&cube(&mut meshes, 0.025, 0.04, 0.05), &steel, Transform::from_xyz(0.0, 0.06, 0.01)));
+            });
+
+        // --- Pistolet-mitrailleur ---
+        let base = Transform::from_xyz(0.19, -0.2, -0.38);
+        p.spawn((ViewModel { id: WeaponId::Smg, base, muzzle: Vec3::new(0.19, -0.17, -0.82) }, base, Visibility::Hidden))
+            .with_children(|p| {
+                p.spawn(part(&cube(&mut meshes, 0.05, 0.08, 0.30), &dark, Transform::from_xyz(0.0, 0.0, -0.08)));
+                p.spawn(part(&cyl(&mut meshes, 0.012, 0.18), &steel, Transform::from_xyz(0.0, 0.02, -0.32).with_rotation(along_z)));
+                p.spawn(part(&cube(&mut meshes, 0.035, 0.16, 0.05), &poly, Transform::from_xyz(0.0, -0.12, -0.08)));
+                p.spawn(part(&cube(&mut meshes, 0.035, 0.09, 0.045), &poly, Transform::from_xyz(0.0, -0.07, 0.07).with_rotation(Quat::from_rotation_x(-0.25))));
+                p.spawn(part(&cube(&mut meshes, 0.03, 0.025, 0.14), &steel, Transform::from_xyz(0.0, 0.05, 0.12)));
+            });
+
+        // --- Minigun ---
+        let base = Transform::from_xyz(0.22, -0.22, -0.40);
+        p.spawn((ViewModel { id: WeaponId::Minigun, base, muzzle: Vec3::new(0.22, -0.2, -1.0) }, base, Visibility::Hidden))
+            .with_children(|p| {
+                for (dx, dy) in [(-0.025, 0.0), (0.025, 0.0), (0.0, 0.03), (0.0, -0.03)] {
+                    p.spawn(part(&cyl(&mut meshes, 0.014, 0.62), &steel, Transform::from_xyz(dx, dy, -0.34).with_rotation(along_z)));
+                }
+                p.spawn(part(&cyl(&mut meshes, 0.06, 0.20), &dark, Transform::from_xyz(0.0, 0.0, -0.06).with_rotation(along_z)));
+                p.spawn(part(&cube(&mut meshes, 0.08, 0.14, 0.16), &olive, Transform::from_xyz(0.0, -0.06, 0.10)));
+                p.spawn(part(&cube(&mut meshes, 0.12, 0.10, 0.10), &poly, Transform::from_xyz(0.0, -0.14, 0.02)));
+            });
+
+        // --- Railgun ---
+        let base = Transform::from_xyz(0.19, -0.2, -0.42);
+        p.spawn((ViewModel { id: WeaponId::Railgun, base, muzzle: Vec3::new(0.19, -0.17, -1.1) }, base, Visibility::Hidden))
+            .with_children(|p| {
+                p.spawn(part(&cube(&mut meshes, 0.045, 0.07, 0.62), &steel, Transform::from_xyz(-0.025, 0.0, -0.30)));
+                p.spawn(part(&cube(&mut meshes, 0.045, 0.07, 0.62), &steel, Transform::from_xyz(0.025, 0.0, -0.30)));
+                p.spawn(part(&cube(&mut meshes, 0.012, 0.04, 0.60), &lens, Transform::from_xyz(0.0, 0.0, -0.30)));
+                p.spawn(part(&cube(&mut meshes, 0.09, 0.11, 0.22), &dark, Transform::from_xyz(0.0, -0.01, 0.10)));
+                p.spawn(part(&cube(&mut meshes, 0.04, 0.10, 0.05), &poly, Transform::from_xyz(0.0, -0.10, 0.12).with_rotation(Quat::from_rotation_x(-0.25))));
+            });
+
+        // --- Blocs (construction) ---
+        let base = Transform::from_xyz(0.26, -0.28, -0.48).with_rotation(Quat::from_rotation_y(0.4) * Quat::from_rotation_x(0.2));
+        p.spawn((ViewModel { id: WeaponId::Blocks, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
+            .with_children(|p| {
+                p.spawn(part(&cube(&mut meshes, 0.14, 0.14, 0.14), &tan, Transform::default()));
+                p.spawn(part(&cube(&mut meshes, 0.15, 0.03, 0.15), &yellow, Transform::from_xyz(0.0, 0.0, 0.0)));
+            });
+
         // --- Méga-bombe ---
         let base = Transform::from_xyz(0.25, -0.34, -0.60);
         p.spawn((ViewModel { id: WeaponId::MegaBomb, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
@@ -522,7 +586,7 @@ pub fn act(
     let dt = time.delta_secs();
     hands.cooldown = (hands.cooldown - dt).max(0.0);
     hands.equip = (hands.equip - dt * 4.0).max(0.0);
-    if !d.game.in_game() || shop.open {
+    if !d.game.alive() || shop.open {
         hands.drill = false;
         return;
     }
@@ -540,7 +604,66 @@ pub fn act(
     let trigger = if spec.auto { pressed } else { clicked };
     let online = d.net.is_online();
 
+    // Interagir (F) : portes.
+    if keys.just_pressed(KeyCode::KeyF) && grabbed {
+        if let Some(door) = d.world.door_at(origin, dir, 3.6) {
+            if online {
+                d.net.send_raw(crate::net::protocol::Packet::Interact { door: door as u16 });
+            } else if d.world.toggle_door(door).is_some() {
+                let at = d.world.doors[door].center(&d.world);
+                d.sound(SfxKind::Hit, 0.5, at);
+            } else {
+                d.sound(SfxKind::Empty, 0.6, origin);
+            }
+        }
+    }
+
     match spec.kind {
+        Kind::Build => {
+            if grabbed && buttons.just_pressed(MouseButton::Right) {
+                let n = world::mat::BUILD.len();
+                d.game.build_index = (d.game.build_index + 1) % n;
+                d.sound(SfxKind::Beep, 0.4, origin);
+            }
+            if !pressed || hands.cooldown > 0.0 {
+                return;
+            }
+            let Some(hit) = d.world.raycast(origin, dir, spec.reach) else {
+                return;
+            };
+            if hit.normal == Vec3::ZERO {
+                return;
+            }
+            let cell = hit.cell + hit.normal.as_ivec3();
+            let max = d.world.dims;
+            if cell.y < 1 || cell.cmplt(IVec3::ZERO).any() || cell.cmpge(max).any() || d.world.is_solid(cell) {
+                return;
+            }
+            // Pas de bloc dans le joueur.
+            let lo = d.world.cell_min(cell);
+            let hi = lo + Vec3::splat(world::VOXEL);
+            let body_lo = Vec3::new(origin.x - 0.3, origin.y - 1.6, origin.z - 0.3);
+            let body_hi = Vec3::new(origin.x + 0.3, origin.y + 0.15, origin.z + 0.3);
+            if lo.cmplt(body_hi).all() && hi.cmpgt(body_lo).all() {
+                return;
+            }
+            if !d.game.sandbox() {
+                if d.game.money < 1 {
+                    return;
+                }
+                d.game.money -= 1;
+            }
+            let material = d.game.build_material();
+            d.world.set(cell, true, material);
+            hands.cooldown = spec.cooldown;
+            d.sound(SfxKind::Hit, 0.35, hit.point);
+            if online {
+                d.net.send_raw(crate::net::protocol::Packet::Place {
+                    cell: [cell.x as u16, cell.y as u16, cell.z as u16],
+                    material,
+                });
+            }
+        }
         Kind::Melee if id == WeaponId::Jackhammer => {
             hands.drill = pressed;
             if pressed && hands.cooldown <= 0.0 {
@@ -624,7 +747,10 @@ pub fn act(
                 .unwrap_or(Vec3::new(0.2, -0.15, -0.8));
             let muzzle = cam.transform_point(muzzle_local);
             fx::flash(&mut d.commands, muzzle, 0.35);
-            let heavy = matches!(id, WeaponId::Sniper | WeaponId::Shotgun | WeaponId::Rocket);
+            let heavy = matches!(
+                id,
+                WeaponId::Sniper | WeaponId::Shotgun | WeaponId::Rocket | WeaponId::Revolver | WeaponId::Railgun
+            );
             d.sound(if heavy { SfxKind::HeavyShot } else { SfxKind::Shot }, 0.8, origin);
             d.shake.add(if heavy { 0.3 } else { 0.1 });
 
@@ -660,7 +786,7 @@ pub fn act(
                 let mut travelled = 0.0;
                 let mut end = origin + pdir * spec.reach.min(120.0);
                 // Le sniper traverse plusieurs épaisseurs.
-                for _ in 0..=spec.pierce.min(8) {
+                for _ in 0..=spec.pierce.min(16) {
                     let Some(hit) = d.world.raycast(from, pdir, spec.reach - travelled) else {
                         break;
                     };
@@ -1039,7 +1165,7 @@ pub fn animate_hands(
     let sway = (speed / 5.0).min(1.4);
 
     for (model, mut transform, mut visibility) in &mut models {
-        let shown = game.in_game() && !shop.open && model.id == game.weapon;
+        let shown = game.alive() && !shop.open && model.id == game.weapon;
         let wanted = if shown { Visibility::Inherited } else { Visibility::Hidden };
         if *visibility != wanted {
             *visibility = wanted;
@@ -1081,6 +1207,7 @@ pub fn animate_hands(
                     t.rotation *= Quat::from_rotation_x(-s * 0.5) * Quat::from_rotation_z(s * 0.5);
                 }
             }
+            Kind::Build => {}
             Kind::Thrown | Kind::Placed => {
                 if let Some(s) = hands.swing {
                     // Armé en arrière, puis bras tendu vers l'avant.

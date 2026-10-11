@@ -283,6 +283,7 @@ pub fn receive(
     mut remotes: Query<(Entity, &RemotePlayer, &mut Transform)>,
     tags: Query<(Entity, &NameTag)>,
     bombs: Query<(Entity, &crate::weapon::Bomb, &Transform), Without<RemotePlayer>>,
+    ragdolls: Query<(Entity, &crate::vitals::Ragdoll)>,
 ) {
     if !d.net.is_online() {
         // Hors ligne : plus personne d'autre dans le monde.
@@ -474,8 +475,73 @@ pub fn receive(
                 }
                 d.effects(at, radius);
             }
+            Packet::Placed { cells } => {
+                for c in cells {
+                    let cell = IVec3::new(c[0] as i32, c[1] as i32, c[2] as i32);
+                    if c[3] == 255 {
+                        d.world.set(cell, false, 0);
+                    } else {
+                        d.world.set(cell, true, c[3] as u8);
+                    }
+                }
+            }
+            Packet::DoorState { door, open } => {
+                if let Some(door) = d.world.doors.get_mut(door as usize) {
+                    door.is_open = open;
+                }
+            }
+            Packet::Hurt { hp, from } => {
+                d.game.hp = hp as f32;
+                d.shake.add(0.5);
+                let _ = from;
+            }
+            Packet::Died { id, at, push } => {
+                if Some(id) == d.net.id {
+                    d.game.hp = 0.0;
+                    d.game.dead = true;
+                    d.game.respawn_in = crate::game::RESPAWN_TIME;
+                    d.game.death_push = push;
+                } else {
+                    crate::vitals::spawn_ragdoll(
+                        &mut d.commands,
+                        &mut meshes,
+                        &mut materials,
+                        at,
+                        push,
+                        player_color(id),
+                        id,
+                        false,
+                    );
+                    for (entity, remote, _) in &remotes {
+                        if remote.id == id {
+                            d.commands.entity(entity).insert(Visibility::Hidden);
+                        }
+                    }
+                }
+            }
+            Packet::Respawned { id, pos } => {
+                if Some(id) == d.net.id {
+                    d.game.respawn_at = Some(pos);
+                } else {
+                    for (entity, remote, mut t) in &mut remotes {
+                        if remote.id == id {
+                            t.translation = pos;
+                            d.commands.entity(entity).insert(Visibility::Inherited);
+                        }
+                    }
+                    for (entity, r) in &ragdolls {
+                        if r.owner == id && !r.local {
+                            d.commands.entity(entity).despawn();
+                        }
+                    }
+                }
+            }
             // Paquets destinés au serveur : ignorés côté client.
-            Packet::Join { .. } | Packet::State { .. } | Packet::Hit { .. } => {}
+            Packet::Join { .. }
+            | Packet::State { .. }
+            | Packet::Hit { .. }
+            | Packet::Place { .. }
+            | Packet::Interact { .. } => {}
         }
     }
 }

@@ -22,16 +22,21 @@ pub enum HudLabel {
     WeaponName,
     Ammo,
     Hint,
-    Help,
     Gain,
     Players,
+    /// Message de mort, au centre de l'écran.
+    Death,
 }
 #[derive(Component)]
 pub struct ReloadBar;
 #[derive(Component)]
 pub struct PlayersPanel;
 #[derive(Component)]
-pub struct HelpPanel;
+pub struct HpBar;
+#[derive(Component)]
+pub struct HpPanel;
+#[derive(Component)]
+pub struct CrosshairRoot;
 
 /// Case de la barre d'armes.
 #[derive(Component)]
@@ -72,6 +77,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
     commands
         .spawn((
             Hud,
+            CrosshairRoot,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Percent(50.0),
@@ -160,29 +166,46 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 .with_child((HudLabel::Players, ui::text(&font, "", 15.0, ui::TEXT)));
         });
 
-    // Aide (haut centre, H pour masquer).
+    // Points de vie (bas gauche).
+    commands
+        .spawn((
+            Hud,
+            HpPanel,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(20),
+                bottom: px(104),
+                width: px(220.0),
+                height: px(10.0),
+                border_radius: BorderRadius::all(px(5.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+        ))
+        .with_child((
+            HpBar,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                border_radius: BorderRadius::all(px(5.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.85, 0.2, 0.2)),
+        ));
+
+    // Message de mort (centre).
     commands
         .spawn((
             Hud,
             Node {
                 position_type: PositionType::Absolute,
-                top: px(14),
+                bottom: px(120),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
                 ..default()
             },
         ))
-        .with_child((
-            HelpPanel,
-            HudLabel::Help,
-            ui::label(&font, "", 13.0, Color::srgba(1.0, 1.0, 1.0, 0.75)),
-            Node {
-                padding: UiRect::axes(px(12), px(6)),
-                border_radius: BorderRadius::all(px(8.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.32)),
-        ));
+        .with_child((HudLabel::Death, ui::text(&font, "", 30.0, Color::srgb(1.0, 0.45, 0.4))));
 
     // Arme en main + munitions (bas droite).
     commands
@@ -191,7 +214,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
             Node {
                 position_type: PositionType::Absolute,
                 right: px(20),
-                bottom: px(20),
+                bottom: px(104),
                 ..default()
             },
         ))
@@ -242,7 +265,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::FlexEnd,
-                column_gap: px(6.0),
+                column_gap: px(4.0),
                 ..default()
             },
         ))
@@ -251,7 +274,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 bar.spawn((
                     HotbarSlot(id),
                     Node {
-                        width: px(70.0),
+                        width: px(58.0),
                         height: px(62.0),
                         flex_direction: FlexDirection::Column,
                         justify_content: JustifyContent::SpaceBetween,
@@ -272,7 +295,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                         top.spawn((HotbarText::Key(id), ui::text(&font, "", 12.0, ui::MUTED)));
                         top.spawn((HotbarText::Count(id), ui::text(&font, "", 12.0, ui::ACCENT)));
                     });
-                    s.spawn((HotbarText::Name(id), ui::text(&font, "", 13.0, ui::TEXT)));
+                    s.spawn((HotbarText::Name(id), ui::text(&font, "", 11.0, ui::TEXT)));
                 });
             }
         });
@@ -295,6 +318,12 @@ fn short(id: WeaponId) -> &'static str {
         Dynamite => "Dynamite",
         C4 => "C4",
         MegaBomb => "Méga",
+        Pickaxe => "Pioche",
+        Revolver => "Revolver",
+        Smg => "PM",
+        Minigun => "Minigun",
+        Railgun => "Rail",
+        Blocks => "Blocs",
     }
 }
 
@@ -323,11 +352,11 @@ pub fn thousands(n: u32) -> String {
 pub fn update(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut hide_help: Local<bool>,
     mut gain: Local<(u32, u32, f32)>,
     world: Res<VoxelWorld>,
     game: Res<GameState>,
     hands: Res<Hands>,
+    settings: Res<crate::game::Settings>,
     lobby: Res<Lobby>,
     net: Res<crate::net::client::NetClient>,
     mut meter: ResMut<FpsMeter>,
@@ -338,7 +367,8 @@ pub fn update(
         Query<(&HotbarSlot, &mut Node, &mut BorderColor, &mut BackgroundColor)>,
         Query<&mut Node, With<ReloadBar>>,
         Query<&mut Node, With<PlayersPanel>>,
-        Query<&mut Node, With<HelpPanel>>,
+        Query<&mut Node, (With<HpBar>, Without<HotbarSlot>, Without<ReloadBar>, Without<PlayersPanel>)>,
+        Query<&mut Node, (With<CrosshairRoot>, Without<HotbarSlot>, Without<ReloadBar>, Without<PlayersPanel>, Without<HpBar>)>,
     )>,
 ) {
     let mut values: Vec<(HudLabel, String)> = Vec::new();
@@ -374,7 +404,8 @@ pub fn update(
     meter.frames += 1;
     if meter.elapsed >= 0.5 {
         let average = meter.frames as f32 / meter.elapsed;
-        values.push((HudLabel::Fps, format!("{average:.0} FPS")));
+        let fps = if settings.show_fps { format!("{average:.0} FPS") } else { String::new() };
+        values.push((HudLabel::Fps, fps));
         meter.elapsed = 0.0;
         meter.frames = 0;
     }
@@ -408,6 +439,10 @@ pub fn update(
             };
             (stock, hint)
         }
+        Kind::Build => (
+            crate::world::material_name(game.build_material()).to_string(),
+            "Clic : poser · clic droit : matériau".to_string(),
+        ),
         Kind::Melee => (
             format!("{:.1} m", spec.radius),
             if spec.auto {
@@ -432,28 +467,25 @@ pub fn update(
         }
     }
 
-    // --- Aide (H la masque) ---
-    if keys.just_pressed(KeyCode::KeyH) {
-        *hide_help = !*hide_help;
+    // --- Points de vie, viseur, message de mort ---
+    if let Ok(mut bar) = nodes.p3().single_mut() {
+        let w = Val::Percent((game.hp / crate::game::MAX_HP * 100.0).clamp(0.0, 100.0));
+        if bar.width != w {
+            bar.width = w;
+        }
     }
-    let mut help = String::from("ZQSD bouger · Maj courir · Espace sauter · Clic agir · 1-9 / molette armes · R recharger");
-    match game.mode {
-        Mode::Normal => help.push_str(" · B boutique"),
-        Mode::Sandbox => help.push_str(" · V voler"),
-    }
-    if lobby.active {
-        help.push_str(" · Tab joueurs");
-    } else {
-        help.push_str(" · F5/F6 ville");
-    }
-    help.push_str(" · H masquer");
-    values.push((HudLabel::Help, help));
-    if let Ok(mut node) = nodes.p3().single_mut() {
-        let d = if *hide_help { Display::None } else { Display::Flex };
+    if let Ok(mut node) = nodes.p4().single_mut() {
+        let d = if settings.crosshair && !game.dead { Display::Flex } else { Display::None };
         if node.display != d {
             node.display = d;
         }
     }
+    let death = if game.dead {
+        format!("Tu es mort · réapparition dans {:.0} s", game.respawn_in.ceil().max(0.0))
+    } else {
+        String::new()
+    };
+    values.push((HudLabel::Death, death));
 
     // --- Joueurs en ligne (Tab maintenu) ---
     let show_players = lobby.active && keys.pressed(KeyCode::Tab);

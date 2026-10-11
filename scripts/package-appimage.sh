@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
-# Construit dist/BoomGround-x86_64.AppImage (Linux).
+# Construit dist/BoomGround-x86_64.AppImage (le jeu) et
+# dist/BoomGround-server-linux-x86_64 (serveur dédié) sous Linux.
 # L'AppImage se lance avec --portable : pas d'écran d'installation, elle est
 # déjà un fichier autonome.
 #
@@ -43,4 +44,7 @@ fi
 
 # --appimage-extract-and-run : fonctionne sans FUSE (runners CI, conteneurs).
 ARCH=x86_64 "$tool" --appimage-extract-and-run "$appdir" dist/BoomGround-x86_64.AppImage
+# Serveur dédié (sans fenêtre) : server.conf est créé au premier lancement.
+cp target/release/boomground-server dist/BoomGround-server-linux-x86_64
+chmod +x dist/BoomGround-server-linux-x86_64
 ls -lh dist

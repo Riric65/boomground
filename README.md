@@ -1,184 +1,160 @@
 # BoomGround
 
-Destruction de voxels façon Teardown, en Rust + Bevy. **Tout est destructible**
-(sauf la couche de socle tout en bas) : immeubles, vitres, voitures, arbres, routes, sol.
+Bac à sable de destruction en voxels, façon *Teardown*, écrit en Rust avec Bevy.
+**Tout est destructible** (sauf le socle) : immeubles, vitres, voitures, arbres, routes, sol.
+Quand un pilier saute, ce qu'il portait s'écroule vraiment.
 
-## Installer (joueurs)
+> Licence : source disponible, **tous droits réservés**. Tu peux jouer, lire le code et
+> contribuer ; tu ne peux pas le copier ni le redistribuer. Voir [LICENSE](LICENSE).
 
-**Un seul fichier**, rien à compiler, aucun terminal :
+## Télécharger et jouer
 
-| Système | Fichier |
-|---|---|
-| Windows | `BoomGround-Setup.exe` |
-| Linux | `BoomGround-x86_64.AppImage` (`chmod +x` puis double-clic) |
+Les fichiers précompilés sont dans les [releases](https://github.com/Riric65/boomground/releases).
 
-Au premier lancement, le jeu affiche son propre écran d'installation :
-- **Installer** : le jeu se copie dans le dossier des programmes de l'utilisateur, sans
-  droits administrateur (`%LOCALAPPDATA%\Programs\BoomGround` sous Windows,
-  `~/.local/share/boomground` sous Linux, `~/Applications/BoomGround.app` sous macOS).
-  Il crée aussi un raccourci sur le Bureau et dans le menu Démarrer ou le menu des
-  applications, puis il se relance.
-- Sous Windows, une case « Autoriser le multijoueur dans le pare-feu » ajoute la règle
-  qui laisse entrer tes amis. Windows demande une confirmation, une seule fois.
-- **Jouer sans installer** : le jeu se lance tel quel (version portable).
+| Système | Jeu | Serveur dédié (facultatif) |
+|---|---|---|
+| Windows | `BoomGround-Setup.exe` | `BoomGround-server.exe` |
+| Linux | `BoomGround-x86_64.AppImage` (`chmod +x`, puis double-clic) | `BoomGround-server-linux-x86_64` |
 
-Relancer un fichier plus récent propose **Mettre à jour**. Pour désinstaller : Windows →
-« Applications installées » → BoomGround, ou Paramètres → Désinstaller dans le jeu.
+Le jeu est **un seul fichier**. Au premier lancement (Windows), il propose de s'installer
+(raccourcis, pare-feu, désinstallation) ou de jouer sans installer. Détails : [INSTALL](#installation-windows).
 
-Sur macOS, l'application n'est pas signée : la première fois, fais clic droit puis **Ouvrir**.
+## Ce que contient le jeu
 
-## Modes de jeu
+- **Une grande ville** de 845 × 845 m (33 × 33 pâtés de maisons), générée depuis une *seed* :
+  centre-ville de tours, quartiers d'immeubles, banlieue de maisons, entrepôts, parcs,
+  parkings, chantiers.
+- **Intérieurs meublés** : tables et chaises, bureaux, canapés, étagères, plafonniers,
+  lampadaires d'intérieur.
+- **Mobilier urbain** : lampadaires, bancs, bouches d'incendie, poubelles, feux tricolores.
+- **Portes** qui s'ouvrent et se ferment (`F`), et que l'on peut aussi démolir.
+- **Construction** : l'outil *Blocs* pose des blocs de bois, brique, béton, métal, verre,
+  plâtre, tuile, noir ou lumière.
+- **Physique** : ce qui n'est plus relié au sol s'écroule ; les gravats ont une masse
+  (le métal et le béton pèsent plus que le bois), les lourds sont moins poussés par le
+  souffle et écrasent le joueur en tombant (solo).
+- **Mort** : 100 points de vie. À 0, le personnage devient un ragdoll, la caméra passe à la
+  troisième personne, puis tu réapparais au bout de quelques secondes.
+- **19 outils** : marteaux, pioche, marteau-piqueur, armes à feu, bombes, blocs.
+- **Multijoueur** : lobbys sur le réseau local, par code via Internet (UPnP), serveur dédié.
 
-- **Bac à sable** : les 13 armes sont données d'office, munitions et bombes illimitées.
-  `V` active le vol libre.
-- **Mode normal** : on commence avec un simple marteau. Chaque voxel détruit rapporte
-  de l'argent (brique 2 $, métal 3 $, verre 2 $, béton/bois/plâtre 1 $ ; le sol ne
-  rapporte rien). La **boutique** (`B`) vend de meilleurs marteaux, des armes à feu,
-  des munitions et des bombes, qui permettent de casser plus vite et donc de gagner plus.
-
-## Carte et seed
-
-La ville (153 × 153 m, 384 × 64 × 384 voxels) est **générée à partir d'une seed** :
-rues, tours de bureaux, immeubles de briques avec escaliers praticables, entrepôts,
-tours de verre, maisons, parcs, parkings avec voitures, chantiers.
-
-- Dans le menu, la seed peut être un nombre ou un mot (`paris` donne toujours la même ville).
-  « Hasard » en tire une nouvelle, et une seed laissée vide est tirée au hasard.
-- En jeu : `F5` reconstruit la même ville, `F6` en génère une nouvelle.
-
-## Arsenal
-
-| Famille | Armes |
-|---|---|
-| Marteaux | Marteau, Masse, Masse de guerre, Marteau-piqueur (continu) |
-| Armes à feu | Glock 17, Fusil à pompe (9 plombs), Fusil d'assaut (automatique), Sniper .50 (traverse les murs), Lance-roquettes |
-| Bombes lancées | Grenade (rebondit), Dynamite (colle à la surface) |
-| Bombes posées | C4 (clic droit pour toutes les faire sauter), Méga-bombe (minuterie de 8 s, rayon de 7 m) |
-
-Les explosions s'enchaînent : une bombe prise dans le souffle d'une autre saute à son tour.
-
-## Contrôles
+## Commandes
 
 | Touche | Action |
 |---|---|
-| ZQSD / WASD, flèches | se déplacer (les marches d'un voxel se montent sans sauter) |
+| ZQSD / WASD, flèches | se déplacer |
 | Maj | courir |
 | Espace | sauter (en vol libre : monter ; Ctrl/C : descendre) |
 | Souris | regarder (clic = capturer le curseur) |
-| Clic gauche | agir avec l'arme en main |
-| Clic droit | faire sauter les C4 posées |
-| 1…9, 0, molette, Q / E | changer d'arme |
+| Clic gauche | agir avec l'outil en main |
+| Clic droit | faire sauter les C4 · changer de matériau (outil *Blocs*) |
+| `F` | ouvrir / fermer une porte |
+| 1…9, 0, molette, Q / E | changer d'outil |
 | R | recharger |
 | B | boutique (mode normal) |
-| Tab (maintenu) | joueurs et code de la partie (en ligne) |
+| Tab (maintenu) | liste des joueurs et code de la partie (en ligne) |
 | V | vol libre (bac à sable) |
-| H | masquer l'aide |
-| F5 / F6 | même ville / nouvelle ville |
+| F5 / F6 | même ville / nouvelle ville (solo) |
 | Échap | menu (pause) |
 
-Les réglages (pseudo, sensibilité, volume, champ de vision, limite d'images, axe Y,
-plein écran) sont enregistrés
-dans `%APPDATA%\BoomGround` (Windows), `~/Library/Application Support/BoomGround`
-(macOS) ou `~/.config/boomground` (Linux).
+Le HUD n'affiche plus d'aide permanente : tout est ici.
+
+## Modes de jeu
+
+- **Bac à sable** : tous les outils, munitions et bombes illimitées, vol libre, blocs gratuits.
+- **Normal** : on commence avec un marteau. Chaque voxel détruit rapporte de l'argent
+  (métal 3 $, brique/verre/tuile 2 $, béton/bois/plâtre 1 $, lumière 3 $ ; le sol ne
+  rapporte rien). La boutique (`B`) vend les autres outils. Poser un bloc coûte 1 $.
+
+## Arsenal
+
+| Famille | Outils |
+|---|---|
+| Marteaux | Marteau, Masse, Masse de guerre, Pioche, Marteau-piqueur (continu) |
+| Armes à feu | Glock 17, Revolver .44, Pistolet-mitrailleur, Fusil à pompe, Fusil d'assaut, Minigun, Sniper .50, Railgun, Lance-roquettes |
+| Bombes lancées | Grenade (rebondit), Dynamite (colle à la surface) |
+| Bombes posées | C4 (clic droit pour les faire sauter), Méga-bombe (minuterie de 8 s) |
+| Construction | Blocs |
+
+Les explosions s'enchaînent : une bombe prise dans un souffle explose à son tour.
+
+## Carte et seed
+
+- Dans le menu, la seed est un nombre ou un mot (`paris` donne toujours la même ville).
+  « Hasard » en tire une nouvelle.
+- La carte se charge progressivement autour de toi au démarrage (quelques secondes).
+
+## Réglages
+
+Menu → Paramètres : sensibilité, champ de vision, secousses de caméra, inversion de l'axe Y,
+balancement à la marche, volume général et bruitages, distance d'affichage, qualité des
+ombres, limite d'images, plein écran, compteur de FPS, viseur. Ils sont enregistrés dans
+`%APPDATA%\BoomGround` (Windows) ou `~/.config/boomground` (Linux).
 
 ## Multijoueur
 
-**Créer un lobby** (Multijoueur → Créer un lobby) lance le serveur de la partie **en fond,
-dans le jeu lui-même**, sans fenêtre ni terminal. Ce serveur :
-- annonce la partie sur le réseau local : tes amis sur le même Wi-Fi la voient
-  apparaître toute seule dans « Parties sur ton réseau », il suffit de cliquer ;
-- demande à ta box d'ouvrir le port **28431** (UPnP), pour que les joueurs d'Internet
-  entrent avec le **code de la partie** (ex. `K7M2Q-9XH4C`, bouton « Copier »). La box
-  referme le port quand le lobby se ferme.
+**Créer un lobby** (Multijoueur → Créer un lobby) lance le serveur en fond, dans le jeu.
+Il annonce la partie sur le réseau local et demande à ta box d'ouvrir le port **28431**
+(UPnP). Les joueurs d'Internet entrent avec le **code de la partie** (ex. `K7M2Q-9XH4C`).
+L'hôte clique sur **Lancer la partie** ; un joueur qui arrive ensuite entre directement.
 
-Dans le lobby, l'hôte voit la liste des joueurs et clique sur **Lancer la partie**. Un joueur
-qui arrive ensuite entre directement, avec la ville dans son état actuel.
+Le serveur est l'autorité : il valide chaque tir, pose, ouverture de porte et applique les
+dégâts. Si des amis d'Internet n'entrent pas, le lobby affiche la raison (UPnP désactivé,
+box derrière un CGNAT…) ; redirige alors le port 28431 (TCP) à la main, ou utilise un réseau
+virtuel (Tailscale, ZeroTier).
 
-Pour **rejoindre** : clique sur une partie de la liste, ou saisis le code (ou une adresse IP)
-puis « Rejoindre ». Les joueurs se voient (avatar coloré et pseudo au-dessus de la tête), et
-chacun voit ce que les autres cassent. Le serveur valide chaque action (cadence, portée,
-rayon maximal par arme, téléportation). Le mode de la partie (bac à sable ou normal)
-est choisi par l'hôte.
+### Serveur dédié
 
-**Si les amis d'Internet n'arrivent pas à entrer**, le lobby affiche la raison. En général,
-la box refuse l'ouverture automatique : active l'UPnP dans l'interface de la box, ou
-redirige à la main le port 28431 (TCP) vers le PC de l'hôte. Si la box est derrière le
-réseau de l'opérateur (CGNAT), seule une redirection côté opérateur ou un réseau virtuel
-(Tailscale, ZeroTier…) permet de jouer depuis Internet.
+Lance `BoomGround-server` : au premier démarrage il crée un **`server.conf`** à côté de
+l'exécutable (nom, port, seed, mode, joueurs max, pvp, dégâts, réapparition). Modifie-le
+puis relance. Voir [SERVER.md](SERVER.md).
 
-Serveur dédié (facultatif) : `BoomGround-Setup.exe --server` (variables `BOOM_PORT`,
-`BOOM_SEED`, `BOOM_MODE=normal`, `BOOM_NAME`).
+## Installation (Windows)
 
-## Corrections de cette version
+Au premier lancement, le jeu affiche son écran d'installation :
+- **Installer** : copie dans `%LOCALAPPDATA%\Programs\BoomGround`, raccourcis Bureau et menu
+  Démarrer, sans droits administrateur. Une case ajoute la règle de pare-feu du multijoueur.
+- **Jouer sans installer** : version portable (`--portable`).
 
-- **Collisions** : le joueur pouvait traverser les murs fins quand le jeu ralentissait,
-  et se faisait téléporter de l'autre côté d'un cube quand il y entrait. Les déplacements
-  sont désormais découpés en petits pas, et seuls les voxels **devant** comptent :
-  on ne peut plus rester coincé ni être éjecté. Les gravats sont de vrais obstacles
-  (on monte dessus), les marches se gravissent et on reste collé au sol en descente.
-- **Cubes de gravats** : leur logique était inversée. Casser un voxel faisait apparaître
-  un bloc presque plein **dans le mur restant**, qui disparaissait ensuite quand on
-  finissait de casser la zone. Maintenant, chaque bloc a la taille exacte des voxels
-  cassés et apparaît dans le trou. Il ne tourne plus que sur l'axe vertical, donc sa
-  boîte de collision correspond à ce qu'on voit (fini les cubes penchés qui flottent),
-  et il retombe si son support est détruit. Le nombre de blocs est limité.
-- **Rendu** : une grosse destruction ne mettait à jour que 8 morceaux de la carte, ce
-  qui laissait des voxels « fantômes » visibles. Le reste était perdu, et `F5` ne
-  reconstruisait presque rien. Les faces au bord de la carte manquaient aussi, et les
-  gravats n'avaient pas la même couleur que les murs (conversion sRGB/linéaire).
-- **Armes** : la caméra des armes repeignait l'écran (couleur du ciel), la C4 posée
-  mesurait 4 cm, la traçante était mal orientée, et la secousse laissait la caméra
-  penchée. Toutes les armes ont désormais leur modèle et leurs animations (coup,
-  recul, recharge, lancer, sortie d'arme).
-- **Sons** : chaque son créait une entité jamais supprimée (fuite de mémoire). Les sons
-  sont maintenant synthétisés une seule fois au démarrage.
-- **Réseau** : le serveur rejetait tout tir à plus de 8 m (Glock compris), refusait la
-  première position du joueur, détruisait des voxels sans les diffuser quand le budget
-  était dépassé, et la C4 était dupliquée chez celui qui la posait. Les trames pouvaient
-  aussi être coupées sur un socket non bloquant. Le serveur dédié tournait à 100 % d'un cœur.
+Désinstaller : « Applications installées » → BoomGround, ou Paramètres → Désinstaller.
 
-## Développement
+## Compiler
 
 ```bash
-cargo run                       # le jeu (debug optimisé)
-cargo run -- --server           # serveur dédié
-cargo test                      # tests (collisions, maillage, protocole, codes de partie, réseau local…)
+cargo run --release                 # le jeu
+cargo run --release --bin boomground-server   # serveur dédié
+cargo test --release                # tests
 ```
 
-Construire le fichier à distribuer :
+Paquets distribuables :
 
 ```bash
-powershell -ExecutionPolicy Bypass -File scripts/package.ps1   # Windows → dist/BoomGround-Setup.exe
-sh scripts/package-appimage.sh                                 # Linux → dist/BoomGround-x86_64.AppImage
+powershell -ExecutionPolicy Bypass -File scripts/package.ps1   # Windows → dist/
+sh scripts/package-appimage.sh                                 # Linux → dist/
 ```
 
-Le workflow GitHub `.github/workflows/release.yml` construit les trois systèmes à chaque
-push, et publie une release sur un tag `v*`. Sous Linux, la compilation nécessite
-`libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev`.
+Sous Linux : `pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev`.
+Le workflow `.github/workflows/release.yml` compile Windows et Linux à chaque push et publie
+une release sur un tag `v*`.
 
-Mode test automatique : `BOOM_AUTO=1` (captures dans `<dossier temporaire>/boomground/`),
-avec `BOOM_WEAPON=rifle`, `BOOM_MODE=normal`, `BOOM_SEED=42`, `BOOM_SHOP=1`, `BOOM_MENU=1`
-(`BOOM_TAB=multi`), `BOOM_HOST=1` (`BOOM_START_AFTER=10`), `BOOM_JOIN=code`,
-`BOOM_QUIT_AFTER=20`, `BOOM_INSTALLER=1`.
+Variables de test : `BOOM_AUTO=1` (le jeu joue seul), `BOOM_WEAPON`, `BOOM_MODE=normal`,
+`BOOM_SEED`, `BOOM_SHOP=1`, `BOOM_MENU=1`, `BOOM_HOST=1`, `BOOM_JOIN=code`.
 
 ## Architecture
 
 | Module | Rôle |
 |---|---|
-| `world.rs` | grille 384 × 64 × 384 (bitset + 1 octet de matériau), rayon DDA, `carve`, `sweep` sans traversée ni téléportation |
-| `map.rs` | génération de la ville à partir de la seed |
-| `vmesh.rs` | greedy meshing par morceaux de 16³ (opaque + vitres translucides), file de reconstruction |
-| `rubble.rs` | blocs de gravats : chute, empilement, sommeil, réveil si le support disparaît |
-| `debris.rs` | petits éclats décoratifs |
-| `player.rs` | caméra FPS, collisions, marches, vol libre |
-| `weapon.rs` | les 13 armes : modèles en main, actions, bombes, explosions, souffle |
-| `game.rs` | modes, catalogue d'armes, inventaire, argent, réglages enregistrés |
-| `shop.rs` | boutique |
-| `menu.rs`, `hud.rs`, `ui.rs` | interface : menu, lobby, écran d'installation, HUD, champs de saisie, notifications (police embarquée) |
-| `install.rs` | auto-installation (raccourcis, pare-feu, désinstallation) |
-| `fx.rs` | sons synthétisés, secousse, flashs, boules de feu |
-| `net/` | protocole et codes de partie, client, serveur de lobby (en fond ou dédié), découverte réseau local (`lan`), ouverture du port de la box (`upnp`) |
+| `world.rs` | grille en morceaux 16³ alloués à la demande, rayon DDA, `carve`, `collapse` (effondrement), `sweep`, portes |
+| `map.rs` | génération de la ville : quartiers, bâtiments, mobilier, mobilier urbain |
+| `vmesh.rs` | greedy meshing par morceaux (opaque, vitres, lampes) avec file de reconstruction |
+| `rubble.rs` | gravats rigides avec masse, empilement, sommeil |
+| `vitals.rs` | points de vie, mort, ragdoll à particules, caméra de mort, écrasement |
+| `weapon.rs`, `game.rs` | outils, construction, interactions ; état, réglages, spécifications |
+| `net/` | protocole, client, serveur (lobby, dégâts, portes, blocs), réseau local, UPnP |
+| `menu.rs`, `hud.rs`, `shop.rs`, `ui.rs` | interface |
+| `install.rs` | installation autonome |
 
-## Licence
+## Contribuer
 
-Tous droits réservés : voir [LICENSE](LICENSE). Copie, modification et redistribution interdites sans autorisation.
+Les contributions sont bienvenues : voir [CONTRIBUTING.md](CONTRIBUTING.md). L'historique des
+changements est dans [CHANGELOG.md](CHANGELOG.md).

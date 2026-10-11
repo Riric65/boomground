@@ -18,7 +18,7 @@ use crate::rubble::{self, Chunk};
 use crate::world::VoxelWorld;
 
 /// Hauteur des yeux.
-const EYE: f32 = 1.6;
+pub const EYE: f32 = 1.6;
 /// Demi-largeur de la boîte de collision.
 const HALF_W: f32 = 0.3;
 /// Hauteur de la boîte de collision.
@@ -159,7 +159,7 @@ pub fn look(
     mut player: Query<(&mut Transform, &mut Body), With<Player>>,
     mut head: Query<&mut Transform, (With<Head>, Without<Player>)>,
 ) {
-    if shop.open || !game.in_game() {
+    if shop.open || !game.alive() {
         return;
     }
     if buttons.just_pressed(MouseButton::Left) && cursor.grab_mode == CursorGrabMode::None {
@@ -213,6 +213,7 @@ pub fn move_player(
     keys: Res<ButtonInput<KeyCode>>,
     world: Res<VoxelWorld>,
     game: Res<crate::game::GameState>,
+    settings: Res<crate::game::Settings>,
     shop: Res<crate::shop::ShopState>,
     net: Res<crate::net::client::NetClient>,
     mut query: Query<(&mut Transform, &mut Body), With<Player>>,
@@ -223,6 +224,9 @@ pub fn move_player(
         return;
     };
     let dt = time.delta_secs().min(0.05);
+    if game.dead {
+        return;
+    }
 
     // Vol libre : uniquement en bac à sable.
     if keys.just_pressed(KeyCode::KeyV) && game.sandbox() {
@@ -405,7 +409,7 @@ pub fn move_player(
     }
     body.land = (body.land - dt * 0.9).max(0.0);
     body.step = (body.step - dt * 3.0).max(0.0);
-    let intensity = if body.grounded {
+    let intensity = if body.grounded && settings.head_bob {
         (horizontal / WALK).clamp(0.0, 1.4)
     } else {
         0.0

@@ -78,8 +78,12 @@ pub enum MenuAction {
 pub enum SettingKind {
     Sensitivity,
     Volume,
+    Sfx,
     Fov,
     Fps,
+    ViewDistance,
+    Shadows,
+    Shake,
 }
 
 #[derive(Component)]
@@ -116,6 +120,12 @@ pub struct SettingValue(SettingKind);
 pub struct InvertSwitch;
 #[derive(Component)]
 pub struct FullscreenSwitch;
+#[derive(Component)]
+pub struct ShowFpsSwitch;
+#[derive(Component)]
+pub struct CrosshairSwitch;
+#[derive(Component)]
+pub struct BobSwitch;
 #[derive(Component)]
 pub struct DesktopSwitch;
 #[derive(Component)]
@@ -581,15 +591,35 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                     ))
                     .with_children(|p| {
                         p.spawn(ui::text(&font, "Paramètres", 38.0, ui::TEXT));
-                        let mut node = card_node(600.0);
-                        node.row_gap = px(4.0);
-                        p.spawn((ui::card(), shadow())).insert(node).with_children(|c| {
-                            setting_row(c, &font, "Sensibilité de la souris", SettingKind::Sensitivity);
-                            setting_row(c, &font, "Volume", SettingKind::Volume);
-                            setting_row(c, &font, "Champ de vision", SettingKind::Fov);
-                            setting_row(c, &font, "Limite d'images", SettingKind::Fps);
-                            switch_row(c, &font, "Inverser l'axe vertical", settings.invert_y, InvertSwitch);
-                            switch_row(c, &font, "Plein écran", settings.fullscreen, FullscreenSwitch);
+                        p.spawn(Node {
+                            column_gap: px(18.0),
+                            align_items: AlignItems::FlexStart,
+                            ..default()
+                        })
+                        .with_children(|cols| {
+                            let mut node = card_node(430.0);
+                            node.row_gap = px(2.0);
+                            cols.spawn((ui::card(), shadow())).insert(node.clone()).with_children(|c| {
+                                c.spawn(ui::text(&font, "JEU ET CONTRÔLES", 13.0, ui::MUTED));
+                                setting_row(c, &font, "Sensibilité de la souris", SettingKind::Sensitivity);
+                                setting_row(c, &font, "Champ de vision", SettingKind::Fov);
+                                setting_row(c, &font, "Secousses de caméra", SettingKind::Shake);
+                                switch_row(c, &font, "Inverser l'axe vertical", settings.invert_y, InvertSwitch);
+                                switch_row(c, &font, "Balancement à la marche", settings.head_bob, BobSwitch);
+                                c.spawn(ui::text(&font, "SON", 13.0, ui::MUTED));
+                                setting_row(c, &font, "Volume général", SettingKind::Volume);
+                                setting_row(c, &font, "Bruitages", SettingKind::Sfx);
+                            });
+                            cols.spawn((ui::card(), shadow())).insert(node).with_children(|c| {
+                                c.spawn(ui::text(&font, "AFFICHAGE", 13.0, ui::MUTED));
+                                setting_row(c, &font, "Distance d'affichage", SettingKind::ViewDistance);
+                                setting_row(c, &font, "Qualité des ombres", SettingKind::Shadows);
+                                setting_row(c, &font, "Limite d'images", SettingKind::Fps);
+                                switch_row(c, &font, "Plein écran", settings.fullscreen, FullscreenSwitch);
+                                c.spawn(ui::text(&font, "INTERFACE", 13.0, ui::MUTED));
+                                switch_row(c, &font, "Afficher les FPS", settings.show_fps, ShowFpsSwitch);
+                                switch_row(c, &font, "Afficher le viseur", settings.crosshair, CrosshairSwitch);
+                            });
                         });
                         p.spawn((
                             UninstallRow,
@@ -1110,7 +1140,13 @@ pub fn actions(
                 match kind {
                     SettingKind::Sensitivity => settings.sensitivity *= if dir > 0 { 1.15 } else { 1.0 / 1.15 },
                     SettingKind::Volume => settings.volume += 0.1 * d,
+                    SettingKind::Sfx => settings.sfx += 0.1 * d,
                     SettingKind::Fov => settings.fov += 5.0 * d,
+                    SettingKind::ViewDistance => settings.view_distance += 40.0 * d,
+                    SettingKind::Shadows => {
+                        settings.shadows = (settings.shadows as i32 + dir as i32).clamp(0, 2) as u8
+                    }
+                    SettingKind::Shake => settings.shake += 0.25 * d,
                     SettingKind::Fps => {
                         settings.fps_limit = match (settings.fps_limit <= 0.0, dir > 0) {
                             (true, true) => 0.0,
@@ -1350,12 +1386,34 @@ pub fn settings_panel(
     mut limit: ResMut<crate::perf::FpsLimit>,
     values: Query<(&SettingValue, &Children)>,
     mut texts: Query<&mut Text>,
-    switches: Query<(&Switch, Has<InvertSwitch>, Has<FullscreenSwitch>), Changed<Switch>>,
+    switches: Query<
+        (
+            &Switch,
+            Has<InvertSwitch>,
+            Has<FullscreenSwitch>,
+            Has<ShowFpsSwitch>,
+            Has<CrosshairSwitch>,
+            Has<BobSwitch>,
+        ),
+        Changed<Switch>,
+    >,
     mut window: Query<&mut Window, With<PrimaryWindow>>,
     mut projection: Query<&mut Projection, With<crate::player::WorldCamera>>,
+    mut fog: Query<&mut DistanceFog, With<crate::player::WorldCamera>>,
+    mut suns: Query<&mut DirectionalLight>,
+    mut shadow_map: ResMut<bevy::light::DirectionalLightShadowMap>,
     mut first: Local<bool>,
 ) {
-    for (s, invert, fullscreen) in &switches {
+    for (s, invert, fullscreen, show_fps, crosshair, bob) in &switches {
+        if show_fps && settings.show_fps != s.on {
+            settings.show_fps = s.on;
+        }
+        if crosshair && settings.crosshair != s.on {
+            settings.crosshair = s.on;
+        }
+        if bob && settings.head_bob != s.on {
+            settings.head_bob = s.on;
+        }
         if invert && settings.invert_y != s.on {
             settings.invert_y = s.on;
         }
@@ -1382,16 +1440,37 @@ pub fn settings_panel(
             w.mode = mode;
         }
     }
+    crate::fx::set_sfx_scale(settings.sfx);
     if let Ok(mut p) = projection.single_mut() {
         if let Projection::Perspective(persp) = p.as_mut() {
             persp.fov = settings.fov.to_radians();
+            persp.far = settings.view_distance + 60.0;
         }
+    }
+    if let Ok(mut f) = fog.single_mut() {
+        f.falloff = FogFalloff::Linear {
+            start: settings.view_distance * 0.35,
+            end: settings.view_distance,
+        };
+    }
+    for mut sun in &mut suns {
+        if sun.illuminance > 5000.0 {
+            sun.shadow_maps_enabled = settings.shadows > 0;
+        }
+    }
+    let size = if settings.shadows >= 2 { 4096 } else { 2048 };
+    if shadow_map.size != size {
+        shadow_map.size = size;
     }
     for (value, children) in &values {
         let v = match value.0 {
             SettingKind::Sensitivity => format!("{:.0} %", settings.sensitivity / 0.0022 * 100.0),
             SettingKind::Volume => format!("{:.0} %", settings.volume * 100.0),
             SettingKind::Fov => format!("{:.0}°", settings.fov),
+            SettingKind::Sfx => format!("{:.0} %", settings.sfx * 100.0),
+            SettingKind::ViewDistance => format!("{:.0} m", settings.view_distance),
+            SettingKind::Shadows => ["aucune", "moyenne", "haute"][settings.shadows.min(2) as usize].to_string(),
+            SettingKind::Shake => format!("{:.0} %", settings.shake * 100.0),
             SettingKind::Fps => {
                 if settings.fps_limit <= 0.0 {
                     "écran".to_string()

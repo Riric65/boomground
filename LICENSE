@@ -1,38 +1,94 @@
-BoomGround — Licence propriétaire, tous droits réservés
+BoomGround Source-Available License, version 1.0
+Copyright (c) 2026 Riric65 (https://github.com/Riric65) et les contributeurs
 
-Copyright (c) 2026 L3Lunee (https://github.com/L3Lunee)
+Version française — l'original fait foi ; la traduction anglaise suit.
 
-Le code source, les ressources et les binaires de BoomGround (le « Logiciel »)
-sont la propriété exclusive de L3Lunee.
+1. DÉFINITIONS
+   « Logiciel » : le code source, les ressources, la documentation et les binaires
+   de BoomGround publiés dans https://github.com/Riric65/boomground.
+   « Propriétaire » : Riric65. « Toi » : toute personne qui utilise le Logiciel.
 
-Vous êtes autorisé à :
-  - télécharger et exécuter les binaires officiels publiés dans les releases
-    de https://github.com/Riric65/boomground, pour un usage personnel et non
-    commercial ;
-  - lire le code source à des fins d'information.
+2. CE QUE TU PEUX FAIRE
+   a) Télécharger et exécuter les binaires officiels publiés dans les releases du dépôt,
+      pour un usage personnel et non commercial.
+   b) Héberger un serveur dédié avec le binaire officiel, pour jouer entre amis, sans
+      but commercial.
+   c) Lire le code source.
+   d) Forker le dépôt sur GitHub et modifier ta copie dans le seul but de préparer une
+      contribution au dépôt officiel, ou pour ton usage privé sans la diffuser.
 
-Sans autorisation écrite préalable de L3Lunee, il est interdit de :
-  - copier, reproduire ou redistribuer le Logiciel, en tout ou en partie,
-    sous forme de source ou de binaire ;
-  - modifier le Logiciel, créer des œuvres dérivées ou réutiliser son code
-    dans un autre projet ;
-  - publier, héberger, vendre, louer ou sous-licencier le Logiciel ;
-  - désassembler ou décompiler le Logiciel, sauf dans la mesure où la loi
-    l'autorise malgré cette interdiction ;
-  - retirer ou modifier les mentions de copyright.
+3. CE QUE TU NE PEUX PAS FAIRE SANS AUTORISATION ÉCRITE DU PROPRIÉTAIRE
+   a) Copier, reproduire, redistribuer ou publier le Logiciel ou une partie de celui-ci,
+      sous forme de source ou de binaire, y compris une version modifiée ou un fork
+      distribué en dehors de GitHub.
+   b) Réutiliser du code, des ressources ou des algorithmes du Logiciel dans un autre
+      projet.
+   c) Vendre, louer, sous-licencier ou exploiter commercialement le Logiciel, y compris
+      sous forme de service hébergé payant.
+   d) Retirer ou modifier les mentions de copyright et de licence.
+   e) Présenter une version modifiée comme la version officielle.
+   Les restrictions du présent article ne s'appliquent pas dans la mesure où la loi
+   applicable les interdit.
 
-Le Logiciel est fourni « tel quel », sans garantie d'aucune sorte. L'auteur ne
-peut être tenu responsable des dommages résultant de son utilisation.
+4. CONTRIBUTIONS
+   Toute contribution que tu soumets au dépôt (pull request, patch…) est faite sous les
+   conditions suivantes :
+   a) tu déclares en être l'auteur et avoir le droit de la proposer ;
+   b) tu accordes au Propriétaire une licence mondiale, perpétuelle, irrévocable,
+      gratuite et non exclusive pour utiliser, reproduire, modifier, distribuer et
+      sous-licencier ta contribution, sous cette licence ou toute autre ;
+   c) tu conserves la paternité de ta contribution, visible dans l'historique du dépôt.
+   Le Propriétaire est libre d'accepter ou de refuser toute contribution.
 
----
+5. MARQUES
+   Le nom « BoomGround » désigne le projet officiel ; cette licence ne t'accorde aucun
+   droit sur celui-ci en dehors de la désignation honnête du Logiciel.
 
-BoomGround — Proprietary license, all rights reserved
+6. ABSENCE DE GARANTIE
+   Le Logiciel est fourni « tel quel », sans garantie d'aucune sorte, expresse ou
+   implicite. Le Propriétaire n'est pas responsable des dommages résultant de son
+   utilisation.
 
-Copyright (c) 2026 L3Lunee (https://github.com/L3Lunee)
+7. RÉSILIATION
+   Cette licence prend fin automatiquement si tu en violes une condition. Tu dois alors
+   cesser d'utiliser le Logiciel et supprimer tes copies.
 
-You may run the official binaries published in the releases for personal,
-non-commercial use, and read the source code for information purposes only.
-Without prior written permission from L3Lunee you may NOT copy, modify,
-redistribute, publish, sell, sublicense, or create derivative works from the
-Software, in whole or in part, in source or binary form. The Software is
-provided "as is", without warranty of any kind.
+--------------------------------------------------------------------------------------
+
+English version
+
+BoomGround Source-Available License, version 1.0
+Copyright (c) 2026 Riric65 (https://github.com/Riric65) and contributors
+
+1. "Software" means the source code, assets, documentation and binaries of BoomGround
+   published at https://github.com/Riric65/boomground. "Owner" means Riric65.
+
+2. You MAY: (a) download and run the official release binaries for personal,
+   non-commercial use; (b) host a dedicated server with the official binary to play
+   with friends, non-commercially; (c) read the source code; (d) fork the repository on
+   GitHub and modify your copy solely to prepare a contribution to the official
+   repository, or for private use without distributing it.
+
+3. You MAY NOT, without the Owner's prior written permission: (a) copy, reproduce,
+   redistribute or publish the Software or any part of it, in source or binary form,
+   including modified versions or forks distributed outside GitHub; (b) reuse its code,
+   assets or algorithms in another project; (c) sell, rent, sublicense or commercially
+   exploit it, including as a paid hosted service; (d) remove or alter copyright or
+   license notices; (e) present a modified version as the official one. These
+   restrictions do not apply to the extent applicable law prohibits them.
+
+4. Contributions. Anything you submit to the repository (pull request, patch...) is
+   submitted on these terms: (a) you represent that you are its author and have the
+   right to submit it; (b) you grant the Owner a worldwide, perpetual, irrevocable,
+   royalty-free, non-exclusive license to use, reproduce, modify, distribute and
+   sublicense it, under this license or any other; (c) you keep authorship credit,
+   visible in the repository history. The Owner may accept or reject any contribution.
+
+5. The name "BoomGround" designates the official project; this license grants no right
+   to it beyond fair reference to the Software.
+
+6. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
+   THE OWNER IS NOT LIABLE FOR ANY DAMAGES ARISING FROM ITS USE.
+
+7. This license terminates automatically if you violate any of its conditions; you must
+   then stop using the Software and delete your copies.

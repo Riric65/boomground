@@ -22,7 +22,7 @@ pub const ZONE: i32 = 2;
 pub const MAX_BLOCKS: usize = 700;
 /// Blocs créés au maximum par destruction (une méga-bombe casse des
 /// dizaines de milliers de voxels).
-const MAX_PER_HIT: usize = 140;
+const MAX_PER_HIT: usize = 160;
 const GRAVITY: f32 = 22.0;
 /// Grille de collision bloc/bloc.
 const CELL: f32 = 1.0;
@@ -38,6 +38,9 @@ pub struct Chunk {
     pub sleeping: bool,
     /// Temps passé presque immobile.
     pub rest: f32,
+    /// Masse (volume × masse volumique, ~1 pour un bloc de brique de
+    /// 2×2×2 voxels) : les lourds sont moins poussés et écrasent.
+    pub mass: f32,
 }
 
 /// Blocs vivants, du plus ancien au plus récent.
@@ -122,6 +125,7 @@ pub fn spawn_rubble(
                     half,
                     sleeping: false,
                     rest: 0.0,
+                    mass: size.x * size.y * size.z * crate::world::density(material),
                 },
                 Mesh3d(assets.chunk_cube.clone()),
                 MeshMaterial3d(assets.materials[material as usize % assets.materials.len()].clone()),
@@ -150,7 +154,8 @@ pub fn wake_near(query: &mut Query<(&Transform, &mut Chunk)>, at: Vec3, radius: 
             chunk.rest = 0.0;
             if push > 0.0 && dist < radius * 1.5 {
                 let falloff = 1.0 - (dist / (radius * 1.5)).min(1.0);
-                chunk.vel += d.normalize_or(Vec3::Y) * push * falloff + Vec3::Y * push * 0.4 * falloff;
+                let light = (1.0 / chunk.mass.max(0.4)).min(2.0);
+                chunk.vel += (d.normalize_or(Vec3::Y) * push * falloff + Vec3::Y * push * 0.4 * falloff) * light;
             }
         }
     }

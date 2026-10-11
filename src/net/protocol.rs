@@ -19,7 +19,7 @@ pub const DEFAULT_PORT: u16 = 28431;
 pub const DISCOVERY_PORT: u16 = 28432;
 /// Version du protocole : deux versions différentes refusent de jouer
 /// ensemble (message clair plutôt que des paquets incompréhensibles).
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 /// Nombre maximal de joueurs dans une partie.
 pub const MAX_PLAYERS: usize = 16;
 
@@ -74,6 +74,23 @@ pub enum Packet {
     BombPlaced { at: Vec3, weapon: u8 },
     /// Serveur → autres clients : une explosion a eu lieu (effets).
     Explode { at: Vec3, radius: f32 },
+    /// Client → serveur : pose d'un bloc (outil de construction).
+    Place { cell: [u16; 3], material: u8 },
+    /// Serveur → clients : blocs posés ou retirés `[x, y, z, matériau]`
+    /// (matériau 255 = voxel retiré). Sert aussi aux portes.
+    Placed { cells: Vec<[u16; 4]> },
+    /// Client → serveur : ouvrir / fermer une porte.
+    Interact { door: u16 },
+    /// Serveur → clients : état d'une porte (les voxels arrivent par
+    /// `Placed`).
+    DoorState { door: u16, open: bool },
+    /// Serveur → client : points de vie restants (0..=100) et d'où vient
+    /// le coup.
+    Hurt { hp: u8, from: Vec3 },
+    /// Serveur → clients : un joueur est mort.
+    Died { id: u16, at: Vec3, push: Vec3 },
+    /// Serveur → clients : un joueur réapparaît.
+    Respawned { id: u16, pos: Vec3 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +254,47 @@ impl Packet {
                 }
             }
             Packet::Start => w.u8(11),
+            Packet::Place { cell, material } => {
+                w.u8(12);
+                for c in cell {
+                    w.u16(*c);
+                }
+                w.u8(*material);
+            }
+            Packet::Placed { cells } => {
+                w.u8(13);
+                w.u16(cells.len() as u16);
+                for c in cells {
+                    for v in c {
+                        w.u16(*v);
+                    }
+                }
+            }
+            Packet::Interact { door } => {
+                w.u8(14);
+                w.u16(*door);
+            }
+            Packet::DoorState { door, open } => {
+                w.u8(15);
+                w.u16(*door);
+                w.u8(*open as u8);
+            }
+            Packet::Hurt { hp, from } => {
+                w.u8(16);
+                w.u8(*hp);
+                w.vec3(*from);
+            }
+            Packet::Died { id, at, push } => {
+                w.u8(17);
+                w.u16(*id);
+                w.vec3(*at);
+                w.vec3(*push);
+            }
+            Packet::Respawned { id, pos } => {
+                w.u8(18);
+                w.u16(*id);
+                w.vec3(*pos);
+            }
         }
 
         let body = w.0;
@@ -311,6 +369,36 @@ impl Packet {
                 Packet::Roster { host, players }
             }
             11 => Packet::Start,
+            12 => Packet::Place {
+                cell: [cur.u16()?, cur.u16()?, cur.u16()?],
+                material: cur.u8()?,
+            },
+            13 => {
+                let n = cur.u16()?;
+                let mut cells = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    cells.push([cur.u16()?, cur.u16()?, cur.u16()?, cur.u16()?]);
+                }
+                Packet::Placed { cells }
+            }
+            14 => Packet::Interact { door: cur.u16()? },
+            15 => Packet::DoorState {
+                door: cur.u16()?,
+                open: cur.u8()? != 0,
+            },
+            16 => Packet::Hurt {
+                hp: cur.u8()?,
+                from: cur.vec3()?,
+            },
+            17 => Packet::Died {
+                id: cur.u16()?,
+                at: cur.vec3()?,
+                push: cur.vec3()?,
+            },
+            18 => Packet::Respawned {
+                id: cur.u16()?,
+                pos: cur.vec3()?,
+            },
             _ => return None,
         })
     }
@@ -421,6 +509,8 @@ pub fn split_address(address: &str) -> (String, u16) {
 /// Nombre maximal de cellules par paquet `Voxels` (la trame fait au plus
 /// 65 535 octets).
 pub const MAX_CELLS_PER_PACKET: usize = 10_000;
+/// Idem pour `Placed` (8 octets par cellule).
+pub const MAX_PLACED_PER_PACKET: usize = 7_000;
 
 // ---------------------------------------------------------------------------
 // Codes de partie
@@ -503,7 +593,7 @@ mod tests {
             Packet::Refused { reason: "pleine".into() },
             Packet::Roster {
                 host: 1,
-                players: vec![(1, "L3Lunee".into()), (2, "Sam".into())],
+                players: vec![(1, "Alex".into()), (2, "Sam".into())],
             },
             Packet::Start,
             Packet::Voxels {
@@ -558,5 +648,21 @@ mod tests {
         assert_eq!(split_address("1.2.3.4:99"), ("1.2.3.4".into(), 99));
         assert_eq!(split_address("[::1]:5"), ("::1".into(), 5));
         assert_eq!(split_address("fe80::1"), ("fe80::1".into(), DEFAULT_PORT));
+    }
+
+    #[test]
+    fn new_packets_round_trip() {
+        for p in [
+            Packet::Place { cell: [1, 2, 3], material: 9 },
+            Packet::Placed { cells: vec![[1, 2, 3, 255], [4, 5, 6, 8]] },
+            Packet::Interact { door: 7 },
+            Packet::DoorState { door: 7, open: true },
+            Packet::Hurt { hp: 40, from: Vec3::new(1.0, 2.0, 3.0) },
+            Packet::Died { id: 3, at: Vec3::X, push: Vec3::Y },
+            Packet::Respawned { id: 3, pos: Vec3::Z },
+        ] {
+            let bytes = p.encode();
+            assert_eq!(Packet::decode(&bytes[2..]), Some(p));
+        }
     }
 }

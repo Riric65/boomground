@@ -40,6 +40,7 @@ fn category(kind: Kind) -> (&'static str, Color) {
         Kind::Gun => ("ARME À FEU", ui::BLUE),
         Kind::Thrown => ("BOMBE LANCÉE", ui::HOT),
         Kind::Placed => ("BOMBE POSÉE", ui::RED),
+        Kind::Build => ("OUTIL", ui::GREEN),
     }
 }
 
@@ -63,6 +64,7 @@ fn stats(id: WeaponId) -> String {
             t
         }
         Kind::Thrown | Kind::Placed => format!("Explosion {:.1} m", s.radius),
+        Kind::Build => String::new(),
     }
 }
 
@@ -137,12 +139,15 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                     .with_children(|grid| {
                         for &id in &ALL_WEAPONS {
                             let spec = id.spec();
+                            if spec.kind == Kind::Build {
+                                continue;
+                            }
                             let (cat, color) = category(spec.kind);
                             grid.spawn((
                                 ShopCard(id),
                                 Node {
-                                    width: px(257.0),
-                                    height: px(138.0),
+                                    width: px(200.0),
+                                    height: px(150.0),
                                     flex_direction: FlexDirection::Column,
                                     padding: UiRect::all(px(12.0)),
                                     row_gap: px(4.0),

@@ -1,8 +1,10 @@
 //! Le monde destructible : une grille de voxels compacte.
 //!
-//! Stockage : un **bitset** pour l'occupation (1 bit par cellule) et un
-//! octet pour le matériau. Le rendu passe par des maillages fusionnés par
-//! morceaux (voir `vmesh`), donc aucune entité par voxel.
+//! Stockage : des **morceaux** de 16³ cellules alloués à la demande (un
+//! bitset d'occupation et un octet de matériau par cellule). Le ciel vide
+//! ne coûte rien, ce qui permet une très grande carte. Le rendu passe par
+//! des maillages fusionnés par morceaux (voir `vmesh`), donc aucune entité
+//! par voxel.
 //!
 //! La carte est générée à partir d'une **seed** (voir `map`) : la même seed
 //! donne toujours la même ville, ce qui permet aussi au serveur et aux
@@ -15,8 +17,9 @@ use bevy::prelude::*;
 /// Taille d'un voxel, en mètres.
 pub const VOXEL: f32 = 0.4;
 
-/// Dimensions de la grille (X, Y, Z) en cellules : 153 × 25 × 153 m.
-pub const GRID: [i32; 3] = [384, 64, 384];
+/// Dimensions de la grille (X, Y, Z) en cellules : 845 × 25 × 845 m
+/// (33 × 33 pâtés de maisons, soit ~30 fois l'ancienne carte).
+pub const GRID: [i32; 3] = [2112, 64, 2112];
 
 /// Côté d'un morceau de rendu, en cellules (voir `vmesh`).
 pub const MESH_CHUNK: i32 = 16;
@@ -34,15 +37,33 @@ pub struct RayHit {
     pub cell: IVec3,
 }
 
+/// Cellules par morceau de stockage : `MESH_CHUNK`³.
+const CHUNK_CELLS: usize = (MESH_CHUNK * MESH_CHUNK * MESH_CHUNK) as usize;
+
+/// Un morceau de stockage (alloué seulement s'il contient du solide).
+struct Chunk {
+    solid: [u64; CHUNK_CELLS / 64],
+    mat: [u8; CHUNK_CELLS],
+}
+
+impl Chunk {
+    fn new() -> Box<Self> {
+        Box::new(Self {
+            solid: [0; CHUNK_CELLS / 64],
+            mat: [0; CHUNK_CELLS],
+        })
+    }
+}
+
 #[derive(Resource)]
 pub struct VoxelWorld {
     pub dims: IVec3,
     /// Coin « bas » monde de la cellule (0, 0, 0).
     pub origin: Vec3,
-    /// Bitset d'occupation.
-    solid: Vec<u64>,
-    /// Matériau par cellule.
-    mat: Vec<u8>,
+    /// Nombre de morceaux par axe.
+    chunk_dims: IVec3,
+    /// Morceaux de stockage (`None` = entièrement vide).
+    chunks: Vec<Option<Box<Chunk>>>,
     pub alive: u32,
     pub total: u32,
     /// Seed de la carte actuelle.
@@ -56,6 +77,25 @@ pub struct VoxelWorld {
     pub full_rebuild: bool,
     /// Morceaux de rendu à reconstruire.
     dirty_chunks: HashSet<IVec3>,
+    /// Portes (interactives) générées avec la carte.
+    pub doors: Vec<Door>,
+}
+
+/// Une porte : ses voxels passent de `closed` à `open` (et inversement),
+/// cellule par cellule. Une cellule détruite reste détruite.
+pub struct Door {
+    pub closed: Vec<IVec3>,
+    pub open: Vec<IVec3>,
+    pub is_open: bool,
+}
+
+impl Door {
+    /// Centre actuel de la porte (monde).
+    pub fn center(&self, w: &VoxelWorld) -> Vec3 {
+        let cells = if self.is_open { &self.open } else { &self.closed };
+        let sum: Vec3 = cells.iter().map(|&c| w.cell_center(c)).sum();
+        sum / cells.len().max(1) as f32
+    }
 }
 
 impl Default for VoxelWorld {
@@ -67,13 +107,14 @@ impl Default for VoxelWorld {
 impl VoxelWorld {
     pub fn new() -> Self {
         let dims = IVec3::from(GRID);
-        let count = (dims.x * dims.y * dims.z) as usize;
+        let chunk_dims = dims / MESH_CHUNK;
+        let count = (chunk_dims.x * chunk_dims.y * chunk_dims.z) as usize;
         let size = dims.as_vec3() * VOXEL;
         Self {
             dims,
             origin: Vec3::new(-size.x * 0.5, 0.0, -size.z * 0.5),
-            solid: vec![0; count.div_ceil(64)],
-            mat: vec![0; count],
+            chunk_dims,
+            chunks: (0..count).map(|_| None).collect(),
             alive: 0,
             total: 0,
             seed: 0,
@@ -81,6 +122,7 @@ impl VoxelWorld {
             generation: 0,
             full_rebuild: true,
             dirty_chunks: HashSet::new(),
+            doors: Vec::new(),
         }
     }
 
@@ -108,19 +150,27 @@ impl VoxelWorld {
         }
     }
 
+    /// (indice du morceau, indice dans le morceau) d'une cellule.
     #[inline]
-    pub fn index(&self, c: IVec3) -> Option<usize> {
+    fn locate(&self, c: IVec3) -> Option<(usize, usize)> {
         if c.x < 0 || c.y < 0 || c.z < 0 || c.x >= self.dims.x || c.y >= self.dims.y || c.z >= self.dims.z
         {
             return None;
         }
-        Some(((c.x * self.dims.y + c.y) * self.dims.z + c.z) as usize)
+        let k = c / MESH_CHUNK;
+        let l = c & (MESH_CHUNK - 1);
+        let chunk = (k.x * self.chunk_dims.y + k.y) * self.chunk_dims.z + k.z;
+        let local = (l.x * MESH_CHUNK + l.y) * MESH_CHUNK + l.z;
+        Some((chunk as usize, local as usize))
     }
 
     #[inline]
     pub fn is_solid(&self, c: IVec3) -> bool {
-        match self.index(c) {
-            Some(i) => self.solid[i >> 6] & (1u64 << (i & 63)) != 0,
+        match self.locate(c) {
+            Some((k, i)) => match &self.chunks[k] {
+                Some(ch) => ch.solid[i >> 6] & (1u64 << (i & 63)) != 0,
+                None => false,
+            },
             None => false,
         }
     }
@@ -129,33 +179,190 @@ impl VoxelWorld {
     /// s'en servent pour leur couleur).
     #[inline]
     pub fn material(&self, c: IVec3) -> u8 {
-        self.index(c).map(|i| self.mat[i]).unwrap_or(0)
+        match self.locate(c) {
+            Some((k, i)) => self.chunks[k].as_ref().map_or(0, |ch| ch.mat[i]),
+            None => 0,
+        }
     }
 
     /// Occupe (ou libère) une cellule.
     pub fn set(&mut self, c: IVec3, solid: bool, material: u8) {
-        let Some(i) = self.index(c) else { return };
+        let Some((k, i)) = self.locate(c) else { return };
         let bit = 1u64 << (i & 63);
-        let was = self.solid[i >> 6] & bit != 0;
-        if solid && !was {
-            self.solid[i >> 6] |= bit;
-            self.alive += 1;
-        } else if !solid && was {
-            self.solid[i >> 6] &= !bit;
-            self.alive = self.alive.saturating_sub(1);
-        } else if !solid {
-            return;
-        }
         if solid {
-            self.mat[i] = material;
+            let ch = self.chunks[k].get_or_insert_with(Chunk::new);
+            if ch.solid[i >> 6] & bit == 0 {
+                ch.solid[i >> 6] |= bit;
+                self.alive += 1;
+            }
+            ch.mat[i] = material;
+        } else {
+            let Some(ch) = self.chunks[k].as_mut() else { return };
+            if ch.solid[i >> 6] & bit == 0 {
+                return;
+            }
+            ch.solid[i >> 6] &= !bit;
+            self.alive = self.alive.saturating_sub(1);
         }
         self.touch(c);
     }
 
+    /// Crée une porte fermée : `closed[i]` devient `open[i]` à l'ouverture.
+    /// `material(i)` donne le matériau du voxel `i`.
+    pub fn add_door(&mut self, closed: Vec<IVec3>, open: Vec<IVec3>, material: impl Fn(usize) -> u8) {
+        debug_assert_eq!(closed.len(), open.len());
+        for (i, &c) in closed.iter().enumerate() {
+            self.set(c, true, material(i));
+        }
+        self.doors.push(Door {
+            closed,
+            open,
+            is_open: false,
+        });
+    }
+
+    /// Ouvre ou ferme une porte. Renvoie les modifications faites
+    /// (`[x, y, z, matériau]`, 255 = voxel retiré), ou `None` si quelque
+    /// chose bloque le passage.
+    pub fn toggle_door(&mut self, index: usize) -> Option<Vec<[u16; 4]>> {
+        let door = self.doors.get(index)?;
+        let (from, to) = if door.is_open {
+            (door.open.clone(), door.closed.clone())
+        } else {
+            (door.closed.clone(), door.open.clone())
+        };
+        if from
+            .iter()
+            .zip(&to)
+            .any(|(&f, &t)| self.is_solid(f) && self.is_solid(t))
+        {
+            return None;
+        }
+        let mut edits = Vec::new();
+        for (&f, &t) in from.iter().zip(&to) {
+            if !self.is_solid(f) {
+                continue;
+            }
+            let m = self.material(f);
+            self.set(f, false, 0);
+            self.set(t, true, m);
+            edits.push([f.x as u16, f.y as u16, f.z as u16, 255]);
+            edits.push([t.x as u16, t.y as u16, t.z as u16, m as u16]);
+        }
+        self.doors[index].is_open = !self.doors[index].is_open;
+        Some(edits)
+    }
+
+    /// Porte la plus proche (et visée) à moins de `reach` mètres.
+    pub fn door_at(&self, origin: Vec3, dir: Vec3, reach: f32) -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, door) in self.doors.iter().enumerate() {
+            let c = door.center(self);
+            let to = c - origin;
+            let along = to.dot(dir);
+            if along < 0.0 || along > reach {
+                continue;
+            }
+            // Distance du centre au rayon : la porte fait ~1,6 × 2,4 m.
+            let off = (to - dir * along).length();
+            if off < 1.3 && best.is_none_or(|(_, d)| along < d) {
+                best = Some((i, along));
+            }
+        }
+        best.map(|(i, _)| i)
+    }
+
+    /// Intégrité structurelle : après une destruction, retire (et renvoie)
+    /// les voxels qui ne tiennent plus au sol. `destroyed` : cellules qui
+    /// viennent d'être détruites.
+    ///
+    /// Recherche « meilleur d'abord » vers le bas depuis chaque voisin
+    /// plein : un ensemble relié au sol est trouvé en quelques pas ; un
+    /// ensemble flottant est exploré en entier puis retiré. Les très gros
+    /// ensembles (au-delà de `LIMIT`) sont réputés stables.
+    pub fn collapse(&mut self, destroyed: &[IVec3]) -> Vec<IVec3> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        const LIMIT: usize = 24_000;
+        const MAX_SEEDS: usize = 4_000;
+        const MAX_FALLEN: usize = 60_000;
+        const OFFSETS: [IVec3; 6] = [
+            IVec3::X,
+            IVec3::NEG_X,
+            IVec3::Y,
+            IVec3::NEG_Y,
+            IVec3::Z,
+            IVec3::NEG_Z,
+        ];
+        let ground = crate::map::GROUND;
+
+        let mut seeds: Vec<IVec3> = Vec::new();
+        let mut seen_seed: HashSet<IVec3> = HashSet::new();
+        'outer: for &c in destroyed {
+            for o in OFFSETS {
+                let n = c + o;
+                if self.is_solid(n) && seen_seed.insert(n) {
+                    seeds.push(n);
+                    if seeds.len() >= MAX_SEEDS {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        let mut anchored: HashSet<IVec3> = HashSet::new();
+        let mut fallen: Vec<IVec3> = Vec::new();
+        for seed in seeds {
+            if anchored.contains(&seed) || !self.is_solid(seed) || fallen.len() >= MAX_FALLEN {
+                continue;
+            }
+            let mut visited: HashSet<IVec3> = HashSet::new();
+            let mut heap = BinaryHeap::new();
+            visited.insert(seed);
+            heap.push(Reverse((seed.y, seed.x, seed.z)));
+            let mut stable = false;
+            while let Some(Reverse((y, x, z))) = heap.pop() {
+                if y < ground || visited.len() > LIMIT {
+                    stable = true;
+                    break;
+                }
+                let c = IVec3::new(x, y, z);
+                for o in OFFSETS {
+                    let n = c + o;
+                    if self.is_solid(n) && visited.insert(n) {
+                        heap.push(Reverse((n.y, n.x, n.z)));
+                    }
+                }
+            }
+            if stable {
+                anchored.extend(visited);
+            } else {
+                for &c in &visited {
+                    self.set(c, false, 0);
+                }
+                fallen.extend(visited);
+            }
+        }
+        fallen
+    }
+
+    /// Clefs des morceaux qui contiennent (ou ont contenu) du solide.
+    pub fn allocated_chunks(&self) -> Vec<IVec3> {
+        let cd = self.chunk_dims;
+        let mut out = Vec::new();
+        for (n, ch) in self.chunks.iter().enumerate() {
+            if ch.is_some() {
+                let n = n as i32;
+                out.push(IVec3::new(n / (cd.y * cd.z), (n / cd.z) % cd.y, n % cd.z));
+            }
+        }
+        out
+    }
+
     /// Vide toute la grille.
     pub fn clear(&mut self) {
-        self.solid.iter_mut().for_each(|w| *w = 0);
-        self.mat.iter_mut().for_each(|m| *m = 0);
+        self.chunks.iter_mut().for_each(|c| *c = None);
+        self.doors.clear();
         self.alive = 0;
         self.total = 0;
         self.dirty_chunks.clear();
@@ -504,13 +711,15 @@ pub struct VoxelAssets {
     pub voxel_material: Handle<StandardMaterial>,
     /// Vitres : maillage séparé, translucide.
     pub glass_material: Handle<StandardMaterial>,
+    /// Lampes : maillage séparé, lumineux et sans ombre.
+    pub lamp_material: Handle<StandardMaterial>,
     /// Traînée de balle.
     pub tracer_cube: Handle<Mesh>,
     pub tracer_material: Handle<StandardMaterial>,
 }
 
 /// Palette (sRGB) : couleur par identifiant de matériau.
-pub const PALETTE: [(f32, f32, f32); 16] = [
+pub const PALETTE: [(f32, f32, f32); 20] = [
     (0.58, 0.58, 0.55), // 0 béton
     (0.36, 0.36, 0.35), // 1 béton sombre
     (0.17, 0.17, 0.18), // 2 asphalte
@@ -527,6 +736,10 @@ pub const PALETTE: [(f32, f32, f32); 16] = [
     (0.24, 0.45, 0.18), // 13 feuillage
     (0.88, 0.86, 0.30), // 14 peinture (lignes de route)
     (0.70, 0.18, 0.15), // 15 tuile / métal peint
+    (1.00, 0.93, 0.62), // 16 lampe (émissive)
+    (0.62, 0.12, 0.10), // 17 rouge (bouches d'incendie, sièges)
+    (0.22, 0.32, 0.58), // 18 bleu (canapés, bennes)
+    (0.07, 0.07, 0.08), // 19 noir (pneus, écrans)
 ];
 
 /// Couleur linéaire d'un matériau : les couleurs de sommets sont lues en
@@ -556,6 +769,45 @@ pub mod mat {
     pub const LEAVES: u8 = 13;
     pub const PAINT: u8 = 14;
     pub const ROOF: u8 = 15;
+    /// Émissive : dessinée dans un maillage à part, sans ombrage.
+    pub const LAMP: u8 = 16;
+    pub const RED: u8 = 17;
+    pub const BLUE: u8 = 18;
+    pub const BLACK: u8 = 19;
+
+    /// Matériaux proposés par l'outil de construction.
+    pub const BUILD: [u8; 9] = [WOOD, BRICK, CONCRETE, METAL, GLASS, PLASTER, ROOF, BLACK, LAMP];
+}
+
+/// Masse volumique relative d'un matériau (sert au poids des gravats).
+pub fn density(material: u8) -> f32 {
+    use mat::*;
+    match material {
+        METAL => 3.0,
+        CONCRETE | CONCRETE_DARK | MORTAR | PLASTER => 2.2,
+        BRICK | BRICK_DARK | ROOF => 2.0,
+        GLASS => 1.6,
+        DIRT | ASPHALT => 1.8,
+        WOOD | LEAVES | RED | BLUE => 0.7,
+        _ => 1.0,
+    }
+}
+
+/// Nom d'un matériau (HUD de l'outil de construction).
+pub fn material_name(material: u8) -> &'static str {
+    use mat::*;
+    match material {
+        WOOD => "Bois",
+        BRICK => "Brique",
+        CONCRETE => "Béton",
+        METAL => "Métal",
+        GLASS => "Verre",
+        PLASTER => "Plâtre",
+        ROOF => "Tuile",
+        BLACK => "Noir",
+        LAMP => "Lumière",
+        _ => "Bloc",
+    }
 }
 
 /// Argent rapporté par un voxel détruit (mode normal). Le sol ne rapporte
@@ -564,6 +816,7 @@ pub fn material_value(material: u8) -> u32 {
     use mat::*;
     match material {
         BRICK | BRICK_DARK | GLASS | ROOF => 2,
+        LAMP => 3,
         METAL => 3,
         CONCRETE | CONCRETE_DARK | MORTAR | WOOD | PLASTER => 1,
         _ => 0,
@@ -600,6 +853,12 @@ pub fn setup_voxel_assets(
         voxel_material: materials.add(StandardMaterial {
             base_color: Color::WHITE,
             perceptual_roughness: 0.9,
+            ..default()
+        }),
+        lamp_material: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            emissive: LinearRgba::rgb(2.4, 2.0, 1.2),
+            unlit: true,
             ..default()
         }),
         glass_material: materials.add(StandardMaterial {
@@ -661,12 +920,18 @@ pub fn damage(
     radius: f32,
     max_debris: usize,
     push: Vec3,
+    collapse: bool,
 ) -> Damage {
-    let destroyed = world.carve(center, radius);
+    let mut destroyed = world.carve(center, radius);
     let value = destroyed
         .iter()
         .map(|&c| material_value(world.material(c)))
         .sum();
+    // Ce qui ne tient plus au sol s'écroule (en ligne, le serveur décide).
+    if collapse && !destroyed.is_empty() {
+        let fallen = world.collapse(&destroyed);
+        destroyed.extend(fallen);
+    }
     crate::rubble::spawn_rubble(rubble, commands, assets, world, &destroyed, center, push, rng);
 
     let debris = destroyed.len().min(max_debris);
@@ -728,6 +993,43 @@ mod tests {
         let destroyed = w.carve(w.cell_center(IVec3::new(1, 0, 1)), 2.0);
         assert!(destroyed.iter().all(|c| c.y > 0));
         assert!(w.is_solid(IVec3::new(1, 0, 1)));
+    }
+
+    #[test]
+    fn floating_part_collapses_but_attached_part_stays() {
+        let mut w = VoxelWorld::new();
+        let g = crate::map::GROUND;
+        // Sol, un pilier et une dalle posée dessus.
+        w.fill(IVec3::new(0, 1, 0), IVec3::new(40, g, 40), mat::DIRT);
+        w.fill(IVec3::new(10, g, 10), IVec3::new(12, g + 10, 12), mat::CONCRETE);
+        w.fill(IVec3::new(10, g + 10, 10), IVec3::new(20, g + 12, 20), mat::CONCRETE);
+        // On coupe le pilier : la dalle ne tient plus.
+        let cut = w.carve(w.cell_center(IVec3::new(10, g + 4, 10)), 1.5);
+        assert!(!cut.is_empty());
+        let fallen = w.collapse(&cut);
+        assert!(fallen.iter().any(|c| c.y >= g + 10), "la dalle tombe");
+        assert!(fallen.iter().all(|&c| !w.is_solid(c)));
+        // Ce qui est relié au sol reste.
+        assert!(w.is_solid(IVec3::new(5, g - 1, 5)));
+    }
+
+    #[test]
+    fn door_toggles_and_round_trips() {
+        let mut w = VoxelWorld::new();
+        let closed: Vec<IVec3> = (0..4).map(|i| IVec3::new(5 + i, 10, 5)).collect();
+        let open: Vec<IVec3> = (0..4).map(|i| IVec3::new(5, 10, 6 + i)).collect();
+        w.add_door(closed.clone(), open.clone(), |_| mat::WOOD);
+        assert!(closed.iter().all(|&c| w.is_solid(c)));
+        let edits = w.toggle_door(0).expect("s'ouvre");
+        assert_eq!(edits.len(), 8);
+        assert!(open.iter().all(|&c| w.is_solid(c)));
+        assert!(closed.iter().all(|&c| !w.is_solid(c)));
+        // Bloquée : un voxel sur le chemin du retour.
+        w.set(closed[1], true, mat::BRICK);
+        assert!(w.toggle_door(0).is_none());
+        w.set(closed[1], false, 0);
+        assert!(w.toggle_door(0).is_some());
+        assert!(closed.iter().all(|&c| w.is_solid(c)));
     }
 
     #[test]

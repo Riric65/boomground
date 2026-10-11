@@ -26,11 +26,12 @@ const BUDGET: usize = 40;
 #[derive(Component)]
 pub struct VoxelMesh;
 
-/// Entités d'un morceau : opaque et vitres.
+/// Entités d'un morceau : opaque, vitres et lampes.
 #[derive(Default, Clone, Copy)]
 struct ChunkPair {
     opaque: Option<Entity>,
     glass: Option<Entity>,
+    lamp: Option<Entity>,
 }
 
 /// Table des morceaux vivante : clef → entités.
@@ -39,19 +40,36 @@ pub struct ChunkEntities {
     map: HashMap<IVec3, ChunkPair>,
 }
 
+/// Passe de rendu d'un matériau : 0 opaque, 1 vitres, 2 lampes.
 #[inline]
-fn opaque(world: &VoxelWorld, c: IVec3) -> bool {
-    world.is_solid(c) && world.material(c) != mat::GLASS
+fn pass_of(material: u8) -> u8 {
+    match material {
+        mat::GLASS => 1,
+        mat::LAMP => 2,
+        _ => 0,
+    }
 }
 
 #[inline]
-fn glass(world: &VoxelWorld, c: IVec3) -> bool {
-    world.is_solid(c) && world.material(c) == mat::GLASS
+fn opaque(world: &VoxelWorld, c: IVec3) -> bool {
+    world.is_solid(c) && pass_of(world.material(c)) == 0
+}
+
+/// Cellule solide appartenant à la passe `pass` (≥ 1).
+#[inline]
+fn in_pass(world: &VoxelWorld, c: IVec3, pass: u8) -> bool {
+    world.is_solid(c) && pass_of(world.material(c)) == pass
 }
 
 /// Construit le maillage d'un morceau par fusion gloutonne (`glass_pass` :
 /// uniquement les vitres, sinon uniquement l'opaque).
 pub fn build(world: &VoxelWorld, chunk_corner: IVec3, glass_pass: bool) -> Mesh {
+    build_pass(world, chunk_corner, glass_pass as u8)
+}
+
+/// Comme [`build`], pour une passe : 0 opaque, 1 vitres, 2 lampes.
+pub fn build_pass(world: &VoxelWorld, chunk_corner: IVec3, pass: u8) -> Mesh {
+    let glass_pass = pass != 0;
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
@@ -59,7 +77,17 @@ pub fn build(world: &VoxelWorld, chunk_corner: IVec3, glass_pass: bool) -> Mesh 
     let mut indices: Vec<u32> = Vec::new();
 
     let min = chunk_corner.max(IVec3::ZERO);
-    let max = (chunk_corner + IVec3::splat(CHUNK)).min(world.dims);
+    let mut max = (chunk_corner + IVec3::splat(CHUNK)).min(world.dims);
+
+    // Passe vitres : rien à faire si le morceau n'en contient aucune.
+    if glass_pass {
+        let any = (min.x..max.x).any(|x| {
+            (min.y..max.y).any(|y| (min.z..max.z).any(|z| in_pass(world, IVec3::new(x, y, z), pass)))
+        });
+        if !any {
+            max = min;
+        }
+    }
 
     for axis in 0..3 {
         let u = (axis + 1) % 3;
@@ -91,9 +119,9 @@ pub fn build(world: &VoxelWorld, chunk_corner: IVec3, glass_pass: bool) -> Mesh 
                     back[axis] = slice + 1;
 
                     let value = if glass_pass {
-                        if glass(world, here) && !world.is_solid(back) {
+                        if in_pass(world, here, pass) && !world.is_solid(back) {
                             ((world.material(here) as u16 + 1) << 1) | 1
-                        } else if glass(world, back) && !world.is_solid(here) {
+                        } else if in_pass(world, back, pass) && !world.is_solid(here) {
                             (world.material(back) as u16 + 1) << 1
                         } else {
                             0
@@ -231,7 +259,7 @@ fn corner(
 fn apply(
     slot: &mut Option<Entity>,
     mesh: Mesh,
-    glass_pass: bool,
+    pass: u8,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     existing: &mut Query<&mut Mesh3d, With<VoxelMesh>>,
@@ -250,10 +278,10 @@ fn apply(
         }
         None if empty => {}
         None => {
-            let material = if glass_pass {
-                assets.glass_material.clone()
-            } else {
-                assets.voxel_material.clone()
+            let material = match pass {
+                1 => assets.glass_material.clone(),
+                2 => assets.lamp_material.clone(),
+                _ => assets.voxel_material.clone(),
             };
             let mut e = commands.spawn((
                 VoxelMesh,
@@ -261,7 +289,7 @@ fn apply(
                 MeshMaterial3d(material),
                 Transform::IDENTITY,
             ));
-            if glass_pass {
+            if pass != 0 {
                 e.insert(NotShadowCaster);
             }
             *slot = Some(e.id());
@@ -280,11 +308,13 @@ fn rebuild_chunk(
 ) {
     let corner = key * CHUNK;
     let mut pair = chunks.map.get(&key).copied().unwrap_or_default();
-    let opaque_mesh = build(world, corner, false);
-    apply(&mut pair.opaque, opaque_mesh, false, commands, meshes, existing, assets);
-    let glass_mesh = build(world, corner, true);
-    apply(&mut pair.glass, glass_mesh, true, commands, meshes, existing, assets);
-    if pair.opaque.is_none() && pair.glass.is_none() {
+    let opaque_mesh = build_pass(world, corner, 0);
+    apply(&mut pair.opaque, opaque_mesh, 0, commands, meshes, existing, assets);
+    let glass_mesh = build_pass(world, corner, 1);
+    apply(&mut pair.glass, glass_mesh, 1, commands, meshes, existing, assets);
+    let lamp_mesh = build_pass(world, corner, 2);
+    apply(&mut pair.lamp, lamp_mesh, 2, commands, meshes, existing, assets);
+    if pair.opaque.is_none() && pair.glass.is_none() && pair.lamp.is_none() {
         chunks.map.remove(&key);
     } else {
         chunks.map.insert(key, pair);
@@ -308,45 +338,13 @@ pub fn refresh_chunks(
             commands.entity(entity).despawn();
         }
         chunks.map.clear();
-        let n = world.dims / CHUNK;
-        for cz in 0..n.z {
-            for cy in 0..n.y {
-                for cx in 0..n.x {
-                    let key = IVec3::new(cx, cy, cz);
-                    let corner = key * CHUNK;
-                    let mut pair = ChunkPair::default();
-                    for glass_pass in [false, true] {
-                        let mesh = build(&world, corner, glass_pass);
-                        if mesh.count_vertices() == 0 {
-                            continue;
-                        }
-                        let material = if glass_pass {
-                            assets.glass_material.clone()
-                        } else {
-                            assets.voxel_material.clone()
-                        };
-                        let mut e = commands.spawn((
-                            VoxelMesh,
-                            Mesh3d(meshes.add(mesh)),
-                            MeshMaterial3d(material),
-                            Transform::IDENTITY,
-                        ));
-                        if glass_pass {
-                            e.insert(NotShadowCaster);
-                            pair.glass = Some(e.id());
-                        } else {
-                            pair.opaque = Some(e.id());
-                        }
-                    }
-                    if pair.opaque.is_some() || pair.glass.is_some() {
-                        chunks.map.insert(key, pair);
-                    }
-                }
-            }
-        }
+        // Les morceaux sont remaillés au fil des frames, les plus proches de
+        // la caméra d'abord (voir le budget ci-dessous).
         world.full_rebuild = false;
-        world.dirty_chunks_mut().clear();
-        return;
+        let keys = world.allocated_chunks();
+        let dirty = world.dirty_chunks_mut();
+        dirty.clear();
+        dirty.extend(keys);
     }
 
     if world.dirty_chunks_mut().is_empty() {
@@ -360,12 +358,15 @@ pub fn refresh_chunks(
         .unwrap_or(Vec3::ZERO);
     let origin = world.origin;
     let mut keys: Vec<IVec3> = world.dirty_chunks_mut().iter().copied().collect();
-    keys.sort_by(|a, b| {
-        let ca = origin + (a.as_vec3() + 0.5) * CHUNK as f32 * VOXEL;
-        let cb = origin + (b.as_vec3() + 0.5) * CHUNK as f32 * VOXEL;
-        ca.distance_squared(eye).total_cmp(&cb.distance_squared(eye))
-    });
-    keys.truncate(BUDGET);
+    let dist = |k: &IVec3| {
+        (origin + (k.as_vec3() + 0.5) * CHUNK as f32 * VOXEL).distance_squared(eye)
+    };
+    // Gros chantier (chargement de la carte) : budget élargi.
+    let budget = if keys.len() > 400 { BUDGET * 4 } else { BUDGET };
+    if keys.len() > budget {
+        keys.select_nth_unstable_by(budget, |a, b| dist(a).total_cmp(&dist(b)));
+        keys.truncate(budget);
+    }
     for key in &keys {
         world.dirty_chunks_mut().remove(key);
     }

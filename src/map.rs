@@ -99,9 +99,16 @@ pub fn generate(w: &mut VoxelWorld, seed: u64) -> Vec3 {
         for bz in 0..d.z / BLOCK {
             let min = IVec3::new(bx * BLOCK + margin, GROUND, bz * BLOCK + margin);
             let max = IVec3::new((bx + 1) * BLOCK - margin, GROUND, (bz + 1) * BLOCK - margin);
-            lot(w, &mut rng, min, max);
+            // Distance au centre (en pâtés de maisons) : centre-ville dense
+            // et haut, banlieue de maisons et d'entrepôts.
+            let cx = d.x / BLOCK / 2;
+            let cz = d.z / BLOCK / 2;
+            let ring = (bx - cx).abs().max((bz - cz).abs());
+            lot(w, &mut rng, min, max, ring);
         }
     }
+
+    street_props(w, &mut rng);
 
     // --- Mur d'enceinte ---
     let h = GROUND + 8;
@@ -151,17 +158,38 @@ fn road(w: &mut VoxelWorld, c: i32, along_z: bool) {
     }
 }
 
-/// Remplit un pâté de maisons.
-fn lot(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3) {
-    match rng.range(0, 99) {
-        0..=17 => office(w, rng, min, max),
-        18..=31 => apartment(w, rng, min, max),
-        32..=43 => warehouse(w, rng, min, max),
-        44..=52 => glass_tower(w, rng, min, max),
-        53..=68 => houses(w, rng, min, max),
-        69..=79 => park(w, rng, min, max),
-        80..=89 => parking(w, rng, min, max),
-        _ => construction(w, rng, min, max),
+/// Remplit un pâté de maisons. `ring` : distance au centre-ville, en pâtés.
+fn lot(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3, ring: i32) {
+    let roll = rng.range(0, 99);
+    match ring {
+        // Centre-ville : tours et bureaux.
+        0..=5 => match roll {
+            0..=34 => office(w, rng, min, max),
+            35..=59 => glass_tower(w, rng, min, max),
+            60..=79 => apartment(w, rng, min, max),
+            80..=87 => park(w, rng, min, max),
+            88..=94 => parking(w, rng, min, max),
+            _ => construction(w, rng, min, max),
+        },
+        // Quartiers mixtes.
+        6..=11 => match roll {
+            0..=17 => office(w, rng, min, max),
+            18..=37 => apartment(w, rng, min, max),
+            38..=57 => houses(w, rng, min, max),
+            58..=69 => warehouse(w, rng, min, max),
+            70..=81 => park(w, rng, min, max),
+            82..=91 => parking(w, rng, min, max),
+            _ => construction(w, rng, min, max),
+        },
+        // Périphérie : maisons, entrepôts, parcs.
+        _ => match roll {
+            0..=49 => houses(w, rng, min, max),
+            50..=69 => warehouse(w, rng, min, max),
+            70..=84 => park(w, rng, min, max),
+            85..=92 => parking(w, rng, min, max),
+            93..=96 => apartment(w, rng, min, max),
+            _ => construction(w, rng, min, max),
+        },
     }
 }
 
@@ -306,11 +334,265 @@ fn building(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3, s: &St
         }
     }
 
-    // Quelques meubles / caisses au rez-de-chaussée.
-    for _ in 0..rng.range(0, 3) {
+    // Portes battantes dans les ouvertures (une face sur deux environ).
+    for face in 0..4 {
+        if rng.chance(0.6) {
+            add_door(w, min, max, face, mid_x, mid_z);
+        }
+    }
+
+    // Mobilier et lumières, étage par étage.
+    let mut levels = vec![min.y];
+    levels.extend(floors.iter().copied());
+    for &base in &levels {
+        furnish(w, rng, min, max, base, s);
+    }
+
+    // Quelques caisses au rez-de-chaussée.
+    for _ in 0..rng.range(0, 2) {
         let x = rng.range(min.x + WALL + 2, max.x - WALL - 5);
         let z = rng.range(max.z - WALL - 10, max.z - WALL - 4);
-        crate_stack(w, rng, IVec3::new(x, min.y, z));
+        let at = IVec3::new(x, min.y, z);
+        if free(w, at, at + IVec3::new(5, 8, 5)) {
+            crate_stack(w, rng, at);
+        }
+    }
+}
+
+/// Aucune cellule pleine dans la boîte `[a, b)`.
+fn free(w: &VoxelWorld, a: IVec3, b: IVec3) -> bool {
+    for y in a.y..b.y {
+        for x in a.x..b.x {
+            for z in a.z..b.z {
+                if w.is_solid(IVec3::new(x, y, z)) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Porte battante dans l'ouverture d'une face (0 ouest, 1 est, 2 nord,
+/// 3 sud). Ouverte, elle se range contre le mur, côté intérieur.
+fn add_door(w: &mut VoxelWorld, min: IVec3, max: IVec3, face: i32, mid_x: i32, mid_z: i32) {
+    let mut closed = Vec::new();
+    let mut open = Vec::new();
+    let mut handle = Vec::new();
+    for y in 0..6 {
+        for i in 0..4 {
+            for t in 0..WALL {
+                let yy = min.y + y;
+                let (c, o) = match face {
+                    0 => (
+                        IVec3::new(min.x + t, yy, mid_z - 2 + i),
+                        IVec3::new(min.x + WALL + i, yy, mid_z - 2 + t),
+                    ),
+                    1 => (
+                        IVec3::new(max.x - WALL + t, yy, mid_z - 2 + i),
+                        IVec3::new(max.x - WALL - 1 - i, yy, mid_z - 2 + t),
+                    ),
+                    2 => (
+                        IVec3::new(mid_x - 2 + i, yy, min.z + t),
+                        IVec3::new(mid_x - 2 + t, yy, min.z + WALL + i),
+                    ),
+                    _ => (
+                        IVec3::new(mid_x - 2 + i, yy, max.z - WALL + t),
+                        IVec3::new(mid_x - 2 + t, yy, max.z - WALL - 1 - i),
+                    ),
+                };
+                handle.push(i == 3 && y == 3);
+                closed.push(c);
+                open.push(o);
+            }
+        }
+    }
+    w.add_door(closed, open, |i| if handle[i] { METAL } else { WOOD });
+}
+
+/// Table et chaises, bureau, canapé, étagère, lampadaire d'intérieur, et
+/// plafonniers : tout ce qui rend un étage habité.
+fn furnish(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3, base: i32, s: &Style) {
+    let x0 = min.x + WALL + 1;
+    let x1 = max.x - WALL - 1;
+    let mut z0 = min.z + WALL + 1;
+    let z1 = max.z - WALL - 1;
+    // Les escaliers longent le mur nord.
+    if s.stairs {
+        z0 += 8;
+    }
+    if x1 - x0 < 8 || z1 - z0 < 8 {
+        return;
+    }
+    let ceiling = base + s.storey - 2;
+
+    // Plafonniers : une plaque lumineuse tous les 8 voxels.
+    let mut z = z0 + 2;
+    while z < z1 - 2 {
+        let mut x = x0 + 2;
+        while x < x1 - 2 {
+            let at = IVec3::new(x, ceiling, z);
+            if free(w, at, at + IVec3::new(2, 1, 2)) {
+                w.fill(at, at + IVec3::new(2, 1, 2), LAMP);
+            }
+            x += 8;
+        }
+        z += 8;
+    }
+
+    let area = (x1 - x0) * (z1 - z0);
+    let count = (area / 90).clamp(2, 14);
+    for _ in 0..count {
+        let x = rng.range(x0, x1 - 6);
+        let z = rng.range(z0, z1 - 6);
+        let at = IVec3::new(x, base, z);
+        match rng.range(0, 5) {
+            // Table 4×2 avec quatre chaises.
+            0 | 1 => {
+                if !free(w, at, at + IVec3::new(6, 4, 6)) {
+                    continue;
+                }
+                let top = at + IVec3::new(1, 0, 2);
+                for (dx, dz) in [(0, 0), (3, 0), (0, 1), (3, 1)] {
+                    w.set(top + IVec3::new(dx, 0, dz), true, WOOD);
+                }
+                w.fill(top + IVec3::new(0, 1, 0), top + IVec3::new(4, 2, 2), WOOD);
+                // Chaises : assise, dossier à l'opposé de la table.
+                for (dx, dz, back) in [(1, -1, -1), (2, -1, -1), (1, 2, 1), (2, 2, 1)] {
+                    let c = top + IVec3::new(dx, 0, dz);
+                    w.set(c, true, BLUE);
+                    for h in 0..3 {
+                        w.set(c + IVec3::new(0, h, back), true, WOOD);
+                    }
+                }
+            }
+            // Bureau avec écran et chaise.
+            2 => {
+                if !free(w, at, at + IVec3::new(6, 5, 5)) {
+                    continue;
+                }
+                w.fill(at + IVec3::new(0, 0, 0), at + IVec3::new(1, 1, 2), METAL);
+                w.fill(at + IVec3::new(4, 0, 0), at + IVec3::new(5, 1, 2), METAL);
+                w.fill(at + IVec3::new(0, 1, 0), at + IVec3::new(5, 2, 2), WOOD);
+                w.fill(at + IVec3::new(2, 2, 0), at + IVec3::new(4, 4, 1), BLACK);
+                w.set(at + IVec3::new(2, 0, 3), true, BLUE);
+                w.set(at + IVec3::new(2, 1, 3), true, BLUE);
+                w.set(at + IVec3::new(2, 2, 4), true, BLUE);
+            }
+            // Canapé.
+            3 => {
+                if !free(w, at, at + IVec3::new(5, 3, 3)) {
+                    continue;
+                }
+                w.fill(at, at + IVec3::new(5, 1, 2), BLUE);
+                w.fill(at + IVec3::new(0, 1, 0), at + IVec3::new(5, 2, 1), BLUE);
+                w.fill(at + IVec3::new(0, 1, 0), at + IVec3::new(1, 2, 2), BLUE);
+                w.fill(at + IVec3::new(4, 1, 0), at + IVec3::new(5, 2, 2), BLUE);
+            }
+            // Étagère garnie.
+            4 => {
+                if !free(w, at, at + IVec3::new(6, 6, 2)) {
+                    continue;
+                }
+                w.fill(at, at + IVec3::new(5, 5, 1), WOOD);
+                for shelf in [1, 3] {
+                    w.empty(at + IVec3::new(1, shelf, 0), at + IVec3::new(4, shelf + 1, 1));
+                    if rng.chance(0.7) {
+                        w.set(at + IVec3::new(rng.range(1, 3), shelf, 0), true, RED);
+                    }
+                }
+            }
+            // Lampadaire d'intérieur.
+            _ => {
+                if !free(w, at, at + IVec3::new(1, 6, 1)) {
+                    continue;
+                }
+                w.fill(at, at + IVec3::new(1, 4, 1), METAL);
+                w.fill(at + IVec3::new(0, 4, 0), at + IVec3::new(1, 6, 1), LAMP);
+            }
+        }
+    }
+}
+
+/// Mobilier urbain : lampadaires, bancs, bouches d'incendie, poubelles,
+/// feux tricolores et arbres d'alignement le long des rues.
+fn street_props(w: &mut VoxelWorld, rng: &mut MapRng) {
+    let y0 = GROUND + 1;
+    let blocks = w.dims.x / BLOCK;
+    let len = w.dims.x;
+    for k in 0..=blocks {
+        let c = k * BLOCK;
+        let mut t = 10;
+        while t < len - 10 {
+            // Pas de mobilier sur les carrefours.
+            let m = t % BLOCK;
+            let off = m.min(BLOCK - m);
+            if off > ROAD + WALK + 3 {
+                for side in [-1, 1] {
+                    for along_z in [true, false] {
+                        // Trottoir : bord intérieur, côté `side`.
+                        let a = c + side * (ROAD + 1);
+                        let (x, z, toward) = if along_z {
+                            (a, t, IVec3::new(-side, 0, 0))
+                        } else {
+                            (t, a, IVec3::new(0, 0, -side))
+                        };
+                        let at = IVec3::new(x, y0, z);
+                        let pick = (t / 10 + k + side + along_z as i32) % 4;
+                        match pick {
+                            0 => lamp_post(w, at, toward),
+                            1 if rng.chance(0.5) => bench(w, at, along_z),
+                            2 if rng.chance(0.5) => {
+                                w.fill(at, at + IVec3::new(1, 2, 1), RED);
+                                w.set(at + IVec3::new(0, 2, 0), true, METAL);
+                            }
+                            3 if rng.chance(0.4) => {
+                                w.fill(at, at + IVec3::new(2, 2, 2), BLACK);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            t += 10;
+        }
+        // Feux tricolores aux carrefours.
+        for j in 0..=blocks {
+            let cz = j * BLOCK;
+            let (cx, cz) = (c, cz);
+            for (sx, sz) in [(-1, -1), (1, 1)] {
+                let p = IVec3::new(cx + sx * (ROAD + 1), y0, cz + sz * (ROAD + 1));
+                w.fill(p, p + IVec3::new(1, 11, 1), METAL);
+                w.fill(p + IVec3::new(0, 8, 0), p + IVec3::new(1, 11, 1), BLACK);
+                w.set(p + IVec3::new(0, 9, 0), true, LAMP);
+            }
+        }
+    }
+}
+
+/// Lampadaire : mât métallique, bras courbé au-dessus de la chaussée.
+fn lamp_post(w: &mut VoxelWorld, at: IVec3, toward: IVec3) {
+    if !free(w, at, at + IVec3::new(1, 13, 1)) {
+        return;
+    }
+    w.fill(at, at + IVec3::new(1, 12, 1), METAL);
+    for i in 1..=3 {
+        w.set(at + IVec3::new(0, 11, 0) + toward * i, true, METAL);
+    }
+    w.set(at + IVec3::new(0, 10, 0) + toward * 3, true, LAMP);
+    w.set(at + IVec3::new(0, 10, 0) + toward * 2, true, LAMP);
+}
+
+/// Banc : deux pieds et une assise de 4 voxels.
+fn bench(w: &mut VoxelWorld, at: IVec3, along_z: bool) {
+    let axis = if along_z { IVec3::new(0, 0, 1) } else { IVec3::new(1, 0, 0) };
+    if !free(w, at, at + axis * 4 + IVec3::new(1, 3, 1)) {
+        return;
+    }
+    w.set(at, true, METAL);
+    w.set(at + axis * 3, true, METAL);
+    for i in 0..4 {
+        w.set(at + axis * i + IVec3::new(0, 1, 0), true, WOOD);
     }
 }
 

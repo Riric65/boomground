@@ -19,6 +19,7 @@ pub mod player;
 pub mod rubble;
 pub mod shop;
 pub mod ui;
+pub mod vitals;
 pub mod vmesh;
 pub mod weapon;
 pub mod world;
@@ -127,6 +128,11 @@ pub fn run() {
                 debug::pose.run_if(debug::enabled),
                 player::look,
                 player::move_player.run_if(in_game),
+                vitals::solo_damage,
+                vitals::crush_damage,
+                vitals::lifecycle,
+                vitals::update_ragdolls,
+                vitals::death_camera,
                 fx::apply_shake,
                 weapon::select,
                 weapon::act,
