@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 
 use bevy::input::mouse::AccumulatedMouseMotion;
+use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::CursorOptions;
@@ -84,31 +85,86 @@ pub fn pose(
 }
 
 /// En mode auto, on saute le menu et on démarre directement la partie.
+///
+/// `BOOM_HOST=1` crée un lobby (lancé après `BOOM_START_AFTER` secondes),
+/// `BOOM_JOIN=code` en rejoint un, `BOOM_MENU=1` reste au menu
+/// (`BOOM_TAB=multi|settings`).
+#[allow(clippy::too_many_arguments)]
 pub fn force_playing(
+    time: Res<Time>,
     mut game: ResMut<GameState>,
     mut world: ResMut<crate::world::VoxelWorld>,
     mut cursor: Single<&mut CursorOptions>,
     mut net: ResMut<crate::net::client::NetClient>,
+    mut lobby: ResMut<crate::net::client::Lobby>,
+    mut menu: ResMut<crate::menu::MenuState>,
     mut shop: ResMut<crate::shop::ShopState>,
+    settings: Res<crate::game::Settings>,
     mut done: Local<bool>,
+    mut exit: MessageWriter<AppExit>,
 ) {
-    if *done || env("BOOM_MENU") {
+    let elapsed = time.elapsed_secs();
+    if let Some(quit) = std::env::var("BOOM_QUIT_AFTER").ok().and_then(|v| v.parse::<f32>().ok()) {
+        if elapsed > quit {
+            exit.write(AppExit::Success);
+        }
+    }
+    if let Some(start) = std::env::var("BOOM_START_AFTER").ok().and_then(|v| v.parse::<f32>().ok()) {
+        if elapsed > start && lobby.is_host() && !lobby.started && net.is_online() {
+            net.send_raw(crate::net::protocol::Packet::Start);
+        }
+    }
+    // `BOOM_DO_INSTALL=1` : installe sans cliquer (test de l'installation,
+    // sans la question du pare-feu).
+    if game.phase == Phase::Install && env("BOOM_DO_INSTALL") && !*done {
+        *done = true;
+        let options = crate::install::Options {
+            desktop_shortcut: true,
+            firewall: false,
+        };
+        match crate::install::install(options) {
+            Ok((exe, warnings)) => {
+                info!("installé : {} {warnings:?}", exe.display());
+                let _ = crate::install::launch(&exe);
+                exit.write(AppExit::Success);
+            }
+            Err(e) => error!("installation : {e}"),
+        }
+        return;
+    }
+    if *done || game.phase == Phase::Install {
         return;
     }
     *done = true;
-    if let Ok(address) = std::env::var("BOOM_SERVER") {
-        net.address = address;
-        match net.connect() {
-            Ok(target) => info!("connecté à {target}"),
-            Err(e) => error!("connexion impossible : {e}"),
-        }
-    }
-    game.mode = if std::env::var("BOOM_MODE").is_ok_and(|m| m == "normal") {
+    let mode = if std::env::var("BOOM_MODE").is_ok_and(|m| m == "normal") {
         Mode::Normal
     } else {
         Mode::Sandbox
     };
-    if let Some(seed) = std::env::var("BOOM_SEED").ok().and_then(|s| crate::game::parse_seed(&s)) {
+    let seed = std::env::var("BOOM_SEED").unwrap_or_default();
+    let name = std::env::var("BOOM_NAME").unwrap_or_else(|_| settings.name.clone());
+    if env("BOOM_MENU") {
+        menu.tab = match std::env::var("BOOM_TAB").as_deref() {
+            Ok("multi") => crate::menu::Tab::Multi,
+            Ok("settings") => crate::menu::Tab::Settings,
+            _ => crate::menu::Tab::Play,
+        };
+        return;
+    }
+    if env("BOOM_HOST") {
+        if let Err(e) = crate::menu::create_lobby(&mut net, &mut lobby, &mut game, &name, &seed, mode) {
+            error!("lobby impossible : {e}");
+        }
+        return;
+    }
+    if let Ok(target) = std::env::var("BOOM_JOIN") {
+        if let Err(e) = crate::menu::join_lobby(&mut net, &mut lobby, &mut game, &name, &target) {
+            error!("connexion impossible : {e}");
+        }
+        return;
+    }
+    game.mode = mode;
+    if let Some(seed) = crate::game::parse_seed(&seed) {
         game.seed = seed;
         world.rebuild(seed);
     }

@@ -10,6 +10,7 @@ pub mod debug;
 pub mod fx;
 pub mod game;
 pub mod hud;
+pub mod install;
 pub mod map;
 pub mod menu;
 pub mod net;
@@ -49,10 +50,13 @@ pub fn run() {
         .init_resource::<NetClient>()
         .init_resource::<weapon::Hands>()
         .init_resource::<shop::ShopState>()
+        .init_resource::<net::client::Lobby>()
+        .init_resource::<net::lan::LanBrowser>()
+        .init_resource::<ui::Toasts>()
         .add_message::<weapon::Blast>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "BoomGround".into(),
+                title: format!("BoomGround {}", install::VERSION),
                 resolution: WindowResolution::new(1440, 810),
                 present_mode: PresentMode::AutoVsync,
                 // Les tests automatiques ne volent pas le clavier.
@@ -77,28 +81,36 @@ pub fn run() {
                 player::spawn_player,
                 weapon::setup_viewmodels,
                 setup_scene,
-                apply_settings,
                 hud::setup,
                 menu::setup,
                 shop::setup,
+                ui::setup_toasts,
+                menu::initial_phase,
                 debug::setup,
             )
                 .chain(),
         )
-        // Interface : menu, boutique, tests automatiques.
+        // Interface : menu, lobby, boutique, tests automatiques.
         .add_systems(
             Update,
             (
                 debug::force_playing.run_if(debug::enabled),
                 debug::autopilot.run_if(debug::enabled),
                 debug::overview.run_if(debug::enabled),
-                menu::settings_input,
-                menu::menu_input,
+                ui::text_fields,
+                ui::switches,
+                menu::actions,
+                menu::flow,
+                menu::settings_panel,
+                menu::lan_list,
+                menu::lobby_screen,
+                menu::status_text,
                 shop::toggle,
                 shop::interact,
                 shop::refresh,
-                menu::toggle_visibility,
+                menu::visibility,
                 ui::hover_buttons,
+                ui::update_toasts,
             )
                 .chain(),
         )
@@ -109,6 +121,7 @@ pub fn run() {
             (
                 world::handle_reset,
                 player::respawn_on_rebuild,
+                menu::cinematic_camera,
                 rubble::clear_on_rebuild,
                 weapon::clear_on_rebuild,
                 debug::pose.run_if(debug::enabled),
@@ -123,7 +136,7 @@ pub fn run() {
                 weapon::animate_hands,
             )
                 .chain()
-                .after(ui::hover_buttons),
+                .after(ui::update_toasts),
         )
         // Monde : gravats, débris, effets, rendu, réseau, HUD.
         .add_systems(
@@ -136,6 +149,7 @@ pub fn run() {
                 fx::update_fireballs,
                 net::client::send_state,
                 net::client::receive,
+                net::client::update_nametags,
                 vmesh::refresh_chunks,
                 hud::update,
             )
@@ -145,18 +159,6 @@ pub fn run() {
         // La boucle ne tourne jamais plus vite que l'écran.
         .add_systems(Last, (perf::detect_refresh, perf::limit).chain())
         .run();
-}
-
-/// Applique les réglages enregistrés (volume, limite d'images).
-fn apply_settings(
-    settings: Res<game::Settings>,
-    mut volume: ResMut<GlobalVolume>,
-    mut limit: ResMut<perf::FpsLimit>,
-) {
-    volume.volume = bevy::audio::Volume::Linear(settings.volume);
-    if settings.fps_limit > 0.0 {
-        limit.fps = settings.fps_limit;
-    }
 }
 
 /// Lumière du soleil et ambiance.

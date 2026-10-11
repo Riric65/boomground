@@ -5,9 +5,13 @@ use bevy::prelude::*;
 /// Phase courante.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Phase {
-    /// Menu principal.
+    /// Premier lancement : écran d'installation.
+    Install,
+    /// Menu principal (ou pause).
     #[default]
     Menu,
+    /// Lobby multijoueur : on attend que l'hôte lance la partie.
+    Lobby,
     /// En jeu.
     Playing,
 }
@@ -451,6 +455,8 @@ impl GameState {
 /// Réglages du joueur, modifiables depuis le menu.
 #[derive(Resource)]
 pub struct Settings {
+    /// Pseudo affiché en multijoueur.
+    pub name: String,
     /// Sensibilité de la souris (radian par pixel).
     pub sensitivity: f32,
     /// Volume général (0 = silencieux).
@@ -459,17 +465,34 @@ pub struct Settings {
     pub fps_limit: f32,
     /// Inversion de l'axe vertical.
     pub invert_y: bool,
+    /// Plein écran (fenêtre sans bordure).
+    pub fullscreen: bool,
+    /// Champ de vision (degrés).
+    pub fov: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            name: default_name(),
             sensitivity: 0.0022,
             volume: 0.8,
             fps_limit: 0.0,
             invert_y: false,
+            fullscreen: false,
+            fov: 75.0,
         }
     }
+}
+
+/// Pseudo par défaut : le nom de la session, sinon « Joueur ».
+fn default_name() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .ok()
+        .map(|n| n.chars().take(16).collect::<String>())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "Joueur".to_string())
 }
 
 impl Settings {
@@ -478,6 +501,11 @@ impl Settings {
         self.volume = self.volume.clamp(0.0, 1.0);
         if self.fps_limit > 0.0 {
             self.fps_limit = self.fps_limit.clamp(30.0, 360.0);
+        }
+        self.fov = self.fov.clamp(60.0, 110.0);
+        self.name = self.name.chars().filter(|c| !c.is_control()).take(16).collect();
+        if self.name.trim().is_empty() {
+            self.name = default_name();
         }
     }
 }
@@ -502,12 +530,15 @@ pub fn save_settings(s: &Settings) {
     let Some(dir) = config_dir() else { return };
     let _ = std::fs::create_dir_all(&dir);
     let body = format!(
-        "sensitivity={}
+        "name={}
+sensitivity={}
 volume={}
 fps_limit={}
 invert_y={}
+fullscreen={}
+fov={}
 ",
-        s.sensitivity, s.volume, s.fps_limit, s.invert_y
+        s.name, s.sensitivity, s.volume, s.fps_limit, s.invert_y, s.fullscreen, s.fov
     );
     let _ = std::fs::write(dir.join("settings.txt"), body);
 }
@@ -523,11 +554,15 @@ pub fn load_settings() -> Settings {
     };
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else { continue };
+        let v = v.trim();
         match k.trim() {
-            "sensitivity" => s.sensitivity = v.trim().parse().unwrap_or(s.sensitivity),
-            "volume" => s.volume = v.trim().parse().unwrap_or(s.volume),
-            "fps_limit" => s.fps_limit = v.trim().parse().unwrap_or(s.fps_limit),
-            "invert_y" => s.invert_y = v.trim() == "true",
+            "name" => s.name = v.to_string(),
+            "sensitivity" => s.sensitivity = v.parse().unwrap_or(s.sensitivity),
+            "volume" => s.volume = v.parse().unwrap_or(s.volume),
+            "fps_limit" => s.fps_limit = v.parse().unwrap_or(s.fps_limit),
+            "invert_y" => s.invert_y = v == "true",
+            "fullscreen" => s.fullscreen = v == "true",
+            "fov" => s.fov = v.parse().unwrap_or(s.fov),
             _ => {}
         }
     }

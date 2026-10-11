@@ -5,19 +5,28 @@ Destruction de voxels façon Teardown, en Rust + Bevy. **Tout est destructible**
 
 ## Installer (joueurs)
 
-Il n'y a rien à compiler et aucun terminal à ouvrir.
+**Un seul fichier**, rien à compiler, aucun terminal :
 
-| Système | Fichier | Ce qu'il fait |
-|---|---|---|
-| Windows | `BoomGround-Setup-Windows.exe` | Double-clic, puis « Oui ». Installe le jeu dans `%LOCALAPPDATA%\Programs\BoomGround` (sans droits administrateur), crée les raccourcis Bureau et menu Démarrer, et ajoute une entrée dans « Applications installées » pour désinstaller. |
-| Linux | `BoomGround-Setup-Linux` | Double-clic (ou `./BoomGround-Setup-Linux`). Ajoute BoomGround au menu des applications et la commande `boomground`. |
-| macOS | `BoomGround-Setup-macOS` | Clic droit puis **Ouvrir** la première fois (l'application n'est pas signée). Crée `~/Applications/BoomGround.app`. |
+| Système | Fichier |
+|---|---|
+| Windows | `BoomGround-Setup.exe` |
+| Linux | `BoomGround-Setup-Linux` |
+| macOS | `BoomGround-macOS.zip` (contient `BoomGround.app`) |
 
-Des versions **portables** (`BoomGround-Windows.exe`, `BoomGround-Linux`, `BoomGround-macOS`)
-se lancent aussi directement, sans installation : le jeu tient en un seul fichier, polices comprises.
+Au premier lancement, le jeu affiche son propre écran d'installation :
+- **Installer** : le jeu se copie dans le dossier des programmes de l'utilisateur, sans
+  droits administrateur (`%LOCALAPPDATA%\Programs\BoomGround` sous Windows,
+  `~/.local/share/boomground` sous Linux, `~/Applications/BoomGround.app` sous macOS).
+  Il crée aussi un raccourci sur le Bureau et dans le menu Démarrer ou le menu des
+  applications, puis il se relance.
+- Sous Windows, une case « Autoriser le multijoueur dans le pare-feu » ajoute la règle
+  qui laisse entrer tes amis. Windows demande une confirmation, une seule fois.
+- **Jouer sans installer** : le jeu se lance tel quel (version portable).
 
-Pour désinstaller : Windows → « Applications installées » → BoomGround ; Linux/macOS →
-relancer l'installateur avec `--uninstall`.
+Relancer un fichier plus récent propose **Mettre à jour**. Pour désinstaller : Windows →
+« Applications installées » → BoomGround, ou Paramètres → Désinstaller dans le jeu.
+
+Sur macOS, l'application n'est pas signée : la première fois, fais clic droit puis **Ouvrir**.
 
 ## Modes de jeu
 
@@ -61,27 +70,45 @@ Les explosions s'enchaînent : une bombe prise dans le souffle d'une autre saute
 | Clic droit | faire sauter les C4 posées |
 | 1…9, 0, molette, Q / E | changer d'arme |
 | R | recharger |
-| B ou Tab | boutique (mode normal) |
+| B | boutique (mode normal) |
+| Tab (maintenu) | joueurs et code de la partie (en ligne) |
 | V | vol libre (bac à sable) |
 | H | masquer l'aide |
 | F5 / F6 | même ville / nouvelle ville |
 | Échap | menu (pause) |
 
-Les réglages (sensibilité, volume, limite d'images, axe Y inversé) sont enregistrés
+Les réglages (pseudo, sensibilité, volume, champ de vision, limite d'images, axe Y,
+plein écran) sont enregistrés
 dans `%APPDATA%\BoomGround` (Windows), `~/Library/Application Support/BoomGround`
 (macOS) ou `~/.config/boomground` (Linux).
 
 ## Multijoueur
 
-- **Héberger** : Menu → MULTIJOUEUR → HÉBERGER. Le serveur tourne dans le jeu lui-même,
-  sans fenêtre ni terminal, sur le port **28431** avec la seed choisie.
-- **Rejoindre** : Menu → MULTIJOUEUR, saisir `ip`, `ip:port` ou `domaine.tld`, puis REJOINDRE.
-- **Serveur dédié** (facultatif) : `BoomGround-Server-<os>` (variables `BOOM_PORT`, `BOOM_SEED`).
+**Créer un lobby** (Multijoueur → Créer un lobby) lance le serveur de la partie **en fond,
+dans le jeu lui-même**, sans fenêtre ni terminal. Ce serveur :
+- annonce la partie sur le réseau local : tes amis sur le même Wi-Fi la voient
+  apparaître toute seule dans « Parties sur ton réseau », il suffit de cliquer ;
+- demande à ta box d'ouvrir le port **28431** (UPnP), pour que les joueurs d'Internet
+  entrent avec le **code de la partie** (ex. `K7M2Q-9XH4C`, bouton « Copier »). La box
+  referme le port quand le lobby se ferme.
 
-Tout le monde reçoit la seed du serveur et l'historique des destructions : un joueur
-qui arrive en cours de partie voit la ville dans son état actuel. Le serveur valide
-chaque action (cadence, portée, rayon maximal par type d'arme, téléportation).
-Le multijoueur se joue en bac à sable.
+Dans le lobby, l'hôte voit la liste des joueurs et clique sur **Lancer la partie**. Un joueur
+qui arrive ensuite entre directement, avec la ville dans son état actuel.
+
+Pour **rejoindre** : clique sur une partie de la liste, ou saisis le code (ou une adresse IP)
+puis « Rejoindre ». Les joueurs se voient (avatar coloré et pseudo au-dessus de la tête), et
+chacun voit ce que les autres cassent. Le serveur valide chaque action (cadence, portée,
+rayon maximal par arme, téléportation). Le mode de la partie (bac à sable ou normal)
+est choisi par l'hôte.
+
+**Si les amis d'Internet n'arrivent pas à entrer**, le lobby affiche la raison. En général,
+la box refuse l'ouverture automatique : active l'UPnP dans l'interface de la box, ou
+redirige à la main le port 28431 (TCP) vers le PC de l'hôte. Si la box est derrière le
+réseau de l'opérateur (CGNAT), seule une redirection côté opérateur ou un réseau virtuel
+(Tailscale, ZeroTier…) permet de jouer depuis Internet.
+
+Serveur dédié (facultatif) : `BoomGround-Setup.exe --server` (variables `BOOM_PORT`,
+`BOOM_SEED`, `BOOM_MODE=normal`, `BOOM_NAME`).
 
 ## Corrections de cette version
 
@@ -114,25 +141,26 @@ Le multijoueur se joue en bac à sable.
 ## Développement
 
 ```bash
-cargo run                              # le jeu (debug optimisé)
-cargo run --bin boomground-server      # serveur dédié
-cargo test                             # tests (collisions, maillage, protocole, boutique…)
+cargo run                       # le jeu (debug optimisé)
+cargo run -- --server           # serveur dédié
+cargo test                      # tests (collisions, maillage, protocole, codes de partie, réseau local…)
 ```
 
-Construire les installateurs :
+Construire le fichier à distribuer :
 
 ```bash
-powershell -ExecutionPolicy Bypass -File scripts/package.ps1   # Windows
+powershell -ExecutionPolicy Bypass -File scripts/package.ps1   # Windows → dist/BoomGround-Setup.exe
 sh scripts/package.sh                                          # Linux / macOS
 ```
 
-Les fichiers sont générés dans `dist/`. Le workflow GitHub `.github/workflows/release.yml`
-construit les trois systèmes à chaque push, et publie une release sur un tag `v*`.
-Sous Linux, la compilation nécessite `libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev`.
+Le workflow GitHub `.github/workflows/release.yml` construit les trois systèmes à chaque
+push, et publie une release sur un tag `v*`. Sous Linux, la compilation nécessite
+`libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev`.
 
 Mode test automatique : `BOOM_AUTO=1` (captures dans `<dossier temporaire>/boomground/`),
-avec `BOOM_WEAPON=rifle`, `BOOM_MODE=normal`, `BOOM_SEED=42`, `BOOM_SHOP=1`,
-`BOOM_MENU=1`, `BOOM_OVERVIEW=1`, `BOOM_SERVER=hôte`.
+avec `BOOM_WEAPON=rifle`, `BOOM_MODE=normal`, `BOOM_SEED=42`, `BOOM_SHOP=1`, `BOOM_MENU=1`
+(`BOOM_TAB=multi`), `BOOM_HOST=1` (`BOOM_START_AFTER=10`), `BOOM_JOIN=code`,
+`BOOM_QUIT_AFTER=20`, `BOOM_INSTALLER=1`.
 
 ## Architecture
 
@@ -147,7 +175,7 @@ avec `BOOM_WEAPON=rifle`, `BOOM_MODE=normal`, `BOOM_SEED=42`, `BOOM_SHOP=1`,
 | `weapon.rs` | les 13 armes : modèles en main, actions, bombes, explosions, souffle |
 | `game.rs` | modes, catalogue d'armes, inventaire, argent, réglages enregistrés |
 | `shop.rs` | boutique |
-| `menu.rs`, `hud.rs`, `ui.rs` | interface (police embarquée dans l'exécutable) |
+| `menu.rs`, `hud.rs`, `ui.rs` | interface : menu, lobby, écran d'installation, HUD, champs de saisie, notifications (police embarquée) |
+| `install.rs` | auto-installation (raccourcis, pare-feu, désinstallation) |
 | `fx.rs` | sons synthétisés, secousse, flashs, boules de feu |
-| `net/` | protocole binaire, client, serveur (dédié ou hébergé dans le jeu) |
-| `installer/` | installateur multiplateforme qui embarque le jeu |
+| `net/` | protocole et codes de partie, client, serveur de lobby (en fond ou dédié), découverte réseau local (`lan`), ouverture du port de la box (`upnp`) |

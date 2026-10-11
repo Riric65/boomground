@@ -3,22 +3,45 @@
 //! Le client **prédit** ses actions (réponse immédiate) puis envoie ; le
 //! serveur valide et renvoie la liste **réelle** des voxels détruits. Comme
 //! `carve` est idempotent, un voxel déjà cassé côté client est sans effet.
+//!
+//! Une partie commence par un **lobby** : le serveur envoie la liste des
+//! joueurs (`Roster`) à chaque arrivée ou départ, et l'hôte lance la partie
+//! (`Start`). Un joueur qui arrive après le lancement entre directement.
 
-use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::io::{self, Read};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 
 use bevy::prelude::Vec3;
 
-/// Port par défaut du serveur.
+/// Port TCP par défaut du serveur.
 pub const DEFAULT_PORT: u16 = 28431;
+/// Port UDP de découverte des parties sur le réseau local.
+pub const DISCOVERY_PORT: u16 = 28432;
+/// Version du protocole : deux versions différentes refusent de jouer
+/// ensemble (message clair plutôt que des paquets incompréhensibles).
+pub const PROTOCOL_VERSION: u16 = 2;
+/// Nombre maximal de joueurs dans une partie.
+pub const MAX_PLAYERS: usize = 16;
 
 /// Ce qui circule entre le client et le serveur.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Packet {
-    /// Client → serveur : demande d'entrée.
-    Join { name: String },
-    /// Serveur → client : identifiant attribué et seed de la carte.
-    Welcome { id: u16, seed: u64 },
+    /// Client → serveur : demande d'entrée. `token` identifie l'hôte (0 pour
+    /// les autres joueurs).
+    Join { name: String, token: u64, version: u16 },
+    /// Serveur → client : identifiant, seed, mode, partie déjà lancée.
+    Welcome {
+        id: u16,
+        seed: u64,
+        mode: u8,
+        started: bool,
+    },
+    /// Serveur → client : entrée refusée (version, partie pleine…).
+    Refused { reason: String },
+    /// Serveur → clients : joueurs présents et hôte.
+    Roster { host: u16, players: Vec<(u16, String)> },
+    /// Hôte → serveur → clients : la partie commence.
+    Start,
     /// Client → serveur : position/regard (envoyé en continu).
     State {
         pos: Vec3,
@@ -79,20 +102,64 @@ impl HitKind {
     }
 }
 
+/// Écriture d'un corps de paquet.
+struct Writer(Vec<u8>);
+
+impl Writer {
+    fn u8(&mut self, v: u8) {
+        self.0.push(v);
+    }
+    fn u16(&mut self, v: u16) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn u64(&mut self, v: u64) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn f32(&mut self, v: f32) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn vec3(&mut self, v: Vec3) {
+        self.f32(v.x);
+        self.f32(v.y);
+        self.f32(v.z);
+    }
+    fn string(&mut self, s: &str) {
+        let bytes = &s.as_bytes()[..s.len().min(255)];
+        // Ne jamais couper au milieu d'un caractère UTF-8.
+        let mut end = bytes.len();
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.u16(end as u16);
+        self.0.extend_from_slice(&s.as_bytes()[..end]);
+    }
+}
+
 impl Packet {
     pub fn encode(&self) -> Vec<u8> {
-        let mut body = Vec::with_capacity(64);
+        let mut w = Writer(Vec::with_capacity(64));
         match self {
-            Packet::Join { name } => {
-                body.push(0);
-                let bytes = name.as_bytes();
-                body.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
-                body.extend_from_slice(bytes);
+            Packet::Join {
+                name,
+                token,
+                version,
+            } => {
+                w.u8(0);
+                w.string(name);
+                w.u64(*token);
+                w.u16(*version);
             }
-            Packet::Welcome { id, seed } => {
-                body.push(1);
-                body.extend_from_slice(&id.to_le_bytes());
-                body.extend_from_slice(&seed.to_le_bytes());
+            Packet::Welcome {
+                id,
+                seed,
+                mode,
+                started,
+            } => {
+                w.u8(1);
+                w.u16(*id);
+                w.u64(*seed);
+                w.u8(*mode);
+                w.u8(*started as u8);
             }
             Packet::State {
                 pos,
@@ -100,11 +167,11 @@ impl Packet {
                 pitch,
                 weapon,
             } => {
-                body.push(2);
-                write_vec3(&mut body, *pos);
-                body.extend_from_slice(&yaw.to_le_bytes());
-                body.extend_from_slice(&pitch.to_le_bytes());
-                body.push(*weapon);
+                w.u8(2);
+                w.vec3(*pos);
+                w.f32(*yaw);
+                w.f32(*pitch);
+                w.u8(*weapon);
             }
             Packet::Hit {
                 kind,
@@ -112,20 +179,20 @@ impl Packet {
                 dir,
                 blast,
             } => {
-                body.push(3);
-                body.push(kind.tag());
-                write_vec3(&mut body, *origin);
-                write_vec3(&mut body, *dir);
-                body.extend_from_slice(&blast.to_le_bytes());
+                w.u8(3);
+                w.u8(kind.tag());
+                w.vec3(*origin);
+                w.vec3(*dir);
+                w.f32(*blast);
             }
             Packet::Voxels { cells, rubble } => {
-                body.push(4);
-                body.push(*rubble as u8);
-                body.extend_from_slice(&(cells.len() as u16).to_le_bytes());
+                w.u8(4);
+                w.u8(*rubble as u8);
+                w.u16(cells.len() as u16);
                 for c in cells {
-                    body.extend_from_slice(&c[0].to_le_bytes());
-                    body.extend_from_slice(&c[1].to_le_bytes());
-                    body.extend_from_slice(&c[2].to_le_bytes());
+                    w.u16(c[0]);
+                    w.u16(c[1]);
+                    w.u16(c[2]);
                 }
             }
             Packet::Player {
@@ -135,29 +202,44 @@ impl Packet {
                 pitch,
                 weapon,
             } => {
-                body.push(5);
-                body.extend_from_slice(&id.to_le_bytes());
-                write_vec3(&mut body, *pos);
-                body.extend_from_slice(&yaw.to_le_bytes());
-                body.extend_from_slice(&pitch.to_le_bytes());
-                body.push(*weapon);
+                w.u8(5);
+                w.u16(*id);
+                w.vec3(*pos);
+                w.f32(*yaw);
+                w.f32(*pitch);
+                w.u8(*weapon);
             }
             Packet::PlayerLeft { id } => {
-                body.push(6);
-                body.extend_from_slice(&id.to_le_bytes());
+                w.u8(6);
+                w.u16(*id);
             }
             Packet::BombPlaced { at, weapon } => {
-                body.push(7);
-                write_vec3(&mut body, *at);
-                body.push(*weapon);
+                w.u8(7);
+                w.vec3(*at);
+                w.u8(*weapon);
             }
             Packet::Explode { at, radius } => {
-                body.push(8);
-                write_vec3(&mut body, *at);
-                body.extend_from_slice(&radius.to_le_bytes());
+                w.u8(8);
+                w.vec3(*at);
+                w.f32(*radius);
             }
+            Packet::Refused { reason } => {
+                w.u8(9);
+                w.string(reason);
+            }
+            Packet::Roster { host, players } => {
+                w.u8(10);
+                w.u16(*host);
+                w.u8(players.len().min(255) as u8);
+                for (id, name) in players.iter().take(255) {
+                    w.u16(*id);
+                    w.string(name);
+                }
+            }
+            Packet::Start => w.u8(11),
         }
 
+        let body = w.0;
         let mut out = Vec::with_capacity(body.len() + 2);
         out.extend_from_slice(&(body.len() as u16).to_le_bytes());
         out.extend_from_slice(&body);
@@ -168,13 +250,16 @@ impl Packet {
         let mut cur = Cursor { data: bytes, at: 0 };
         let tag = cur.u8()?;
         Some(match tag {
-            0 => {
-                let name = cur.string()?;
-                Packet::Join { name }
-            }
+            0 => Packet::Join {
+                name: cur.string()?,
+                token: cur.u64()?,
+                version: cur.u16()?,
+            },
             1 => Packet::Welcome {
                 id: cur.u16()?,
                 seed: cur.u64()?,
+                mode: cur.u8()?,
+                started: cur.u8()? != 0,
             },
             2 => Packet::State {
                 pos: cur.vec3()?,
@@ -213,15 +298,22 @@ impl Packet {
                 at: cur.vec3()?,
                 radius: cur.f32()?,
             },
+            9 => Packet::Refused {
+                reason: cur.string()?,
+            },
+            10 => {
+                let host = cur.u16()?;
+                let n = cur.u8()?;
+                let mut players = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    players.push((cur.u16()?, cur.string()?));
+                }
+                Packet::Roster { host, players }
+            }
+            11 => Packet::Start,
             _ => return None,
         })
     }
-}
-
-fn write_vec3(out: &mut Vec<u8>, v: Vec3) {
-    out.extend_from_slice(&v.x.to_le_bytes());
-    out.extend_from_slice(&v.y.to_le_bytes());
-    out.extend_from_slice(&v.z.to_le_bytes());
 }
 
 struct Cursor<'a> {
@@ -292,12 +384,8 @@ impl FrameReader {
     }
 }
 
-pub fn write_packet(stream: &mut TcpStream, packet: &Packet) -> io::Result<()> {
-    stream.write_all(&packet.encode())
-}
-
 pub fn read_into(stream: &mut TcpStream, into: &mut FrameReader) -> io::Result<usize> {
-    let mut chunk = [0u8; 4096];
+    let mut chunk = [0u8; 16 * 1024];
     let n = stream.read(&mut chunk)?;
     if n > 0 {
         into.push(&chunk[..n]);
@@ -305,9 +393,23 @@ pub fn read_into(stream: &mut TcpStream, into: &mut FrameReader) -> io::Result<u
     Ok(n)
 }
 
-/// Découpe `adresse` en hôte + port (port par défaut si absent).
+/// Découpe `adresse` en hôte + port (port par défaut si absent). Gère
+/// `[ipv6]:port`.
 pub fn split_address(address: &str) -> (String, u16) {
     let address = address.trim();
+    if let Some(rest) = address.strip_prefix('[') {
+        if let Some((host, tail)) = rest.split_once(']') {
+            let port = tail
+                .strip_prefix(':')
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(DEFAULT_PORT);
+            return (host.to_string(), port);
+        }
+    }
+    // Une IPv6 nue contient plusieurs « : » : pas de port.
+    if address.matches(':').count() > 1 {
+        return (address.to_string(), DEFAULT_PORT);
+    }
     if let Some((host, port)) = address.rsplit_once(':') {
         if let Ok(port) = port.parse::<u16>() {
             return (host.to_string(), port);
@@ -315,9 +417,70 @@ pub fn split_address(address: &str) -> (String, u16) {
     }
     (address.to_string(), DEFAULT_PORT)
 }
+
 /// Nombre maximal de cellules par paquet `Voxels` (la trame fait au plus
 /// 65 535 octets).
 pub const MAX_CELLS_PER_PACKET: usize = 10_000;
+
+// ---------------------------------------------------------------------------
+// Codes de partie
+// ---------------------------------------------------------------------------
+
+/// Alphabet sans lettres ambiguës (pas de I, L, O, U).
+const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// Code de partie à partager : l'adresse IPv4 et le port, écrits en
+/// 10 caractères lisibles (`K7M2Q-9XH4C`).
+pub fn encode_code(addr: SocketAddrV4) -> String {
+    let ip = u32::from(*addr.ip()) as u64;
+    let value = (ip << 16) | addr.port() as u64;
+    let mut chars = [0u8; 10];
+    for (i, c) in chars.iter_mut().enumerate() {
+        let shift = 5 * (9 - i);
+        *c = ALPHABET[((value >> shift) & 31) as usize];
+    }
+    let s = String::from_utf8(chars.to_vec()).unwrap_or_default();
+    format!("{}-{}", &s[..5], &s[5..])
+}
+
+/// Relit un code de partie (insensible à la casse, tirets et espaces
+/// ignorés, O/I/L tolérés). `None` si ce n'est pas un code.
+pub fn decode_code(text: &str) -> Option<SocketAddrV4> {
+    let cleaned: Vec<u8> = text
+        .chars()
+        .filter(|c| !matches!(c, '-' | ' '))
+        .map(|c| match c.to_ascii_uppercase() {
+            'O' => b'0',
+            'I' | 'L' => b'1',
+            other => other as u8,
+        })
+        .collect();
+    if cleaned.len() != 10 {
+        return None;
+    }
+    let mut value: u64 = 0;
+    for b in cleaned {
+        let digit = ALPHABET.iter().position(|&a| a == b)? as u64;
+        value = (value << 5) | digit;
+    }
+    if value >> 48 != 0 {
+        return None;
+    }
+    let ip = Ipv4Addr::from((value >> 16) as u32);
+    let port = (value & 0xFFFF) as u16;
+    if port == 0 || ip.is_unspecified() {
+        return None;
+    }
+    Some(SocketAddrV4::new(ip, port))
+}
+
+/// Ce que l'utilisateur a saisi pour rejoindre : code de partie ou adresse.
+pub fn resolve_target(text: &str) -> String {
+    match decode_code(text) {
+        Some(addr) => SocketAddr::V4(addr).to_string(),
+        None => text.trim().to_string(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -326,7 +489,23 @@ mod tests {
     #[test]
     fn packets_round_trip() {
         let packets = [
-            Packet::Welcome { id: 3, seed: 123_456_789 },
+            Packet::Join {
+                name: "Héloïse".into(),
+                token: 42,
+                version: PROTOCOL_VERSION,
+            },
+            Packet::Welcome {
+                id: 3,
+                seed: 123_456_789,
+                mode: 1,
+                started: true,
+            },
+            Packet::Refused { reason: "pleine".into() },
+            Packet::Roster {
+                host: 1,
+                players: vec![(1, "Victor".into()), (2, "Sam".into())],
+            },
+            Packet::Start,
             Packet::Voxels {
                 cells: vec![[1, 2, 3], [300, 40, 383]],
                 rubble: true,
@@ -345,8 +524,7 @@ mod tests {
             let mut reader = FrameReader::default();
             reader.push(&bytes);
             let frame = reader.next().expect("trame complète");
-            let back = Packet::decode(&frame).expect("décodage");
-            assert_eq!(format!("{p:?}"), format!("{back:?}"));
+            assert_eq!(Packet::decode(&frame).expect("décodage"), p);
         }
     }
 
@@ -355,5 +533,30 @@ mod tests {
         let cells = vec![[0u16; 3]; MAX_CELLS_PER_PACKET];
         let bytes = Packet::Voxels { cells, rubble: false }.encode();
         assert!(bytes.len() - 2 <= u16::MAX as usize);
+    }
+
+    #[test]
+    fn game_codes_round_trip() {
+        for addr in [
+            SocketAddrV4::new(Ipv4Addr::new(82, 64, 120, 7), DEFAULT_PORT),
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 23), 3000),
+            SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 254), 65535),
+        ] {
+            let code = encode_code(addr);
+            assert_eq!(code.len(), 11);
+            assert_eq!(decode_code(&code), Some(addr));
+            assert_eq!(decode_code(&code.to_lowercase().replace('-', " ")), Some(addr));
+        }
+        assert_eq!(decode_code("192.168.1.2"), None);
+        assert_eq!(decode_code("localhost"), None);
+        assert_eq!(resolve_target("monserveur.fr"), "monserveur.fr");
+    }
+
+    #[test]
+    fn addresses_split() {
+        assert_eq!(split_address("a.fr"), ("a.fr".into(), DEFAULT_PORT));
+        assert_eq!(split_address("1.2.3.4:99"), ("1.2.3.4".into(), 99));
+        assert_eq!(split_address("[::1]:5"), ("::1".into(), 5));
+        assert_eq!(split_address("fe80::1"), ("fe80::1".into(), DEFAULT_PORT));
     }
 }

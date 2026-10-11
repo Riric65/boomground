@@ -1,4 +1,5 @@
-# Construit l'installateur pour Windows, Linux et macOS.
+# Construit le jeu (un seul fichier, qui s'installe lui-même) pour Windows,
+# Linux et macOS.
 #
 # - À chaque push / pull request : les trois versions sont compilées et
 #   téléchargeables dans l'onglet « Actions » (artefacts).
@@ -46,7 +47,7 @@ jobs:
       - name: Tests
         run: cargo test --release
 
-      - name: Installateur
+      - name: Fichier à distribuer
         run: ${{ matrix.script }}
 
       - uses: actions/upload-artifact@v4

@@ -1,35 +1,49 @@
-//! Interface en jeu : viseur, argent, seed, barre d'armes, munitions, FPS,
-//! rappel des contrôles.
+//! Interface en jeu : viseur, argent, barre d'armes, munitions, joueurs en
+//! ligne (Tab), FPS, aide.
 
 use bevy::prelude::*;
 
 use crate::game::{GameState, Kind, Mode, WeaponId, ALL_WEAPONS};
+use crate::net::client::Lobby;
 use crate::ui::{self, UiFont};
 use crate::weapon::{Bomb, Hands};
 use crate::world::VoxelWorld;
 
-/// Marque les éléments d'interface (masqués dans le menu).
+/// Marque les éléments d'interface (masqués hors du jeu).
 #[derive(Component)]
 pub struct Hud;
 
+/// Texte du HUD mis à jour chaque image.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum HudLabel {
+    Money,
+    Info,
+    Fps,
+    WeaponName,
+    Ammo,
+    Hint,
+    Help,
+    Gain,
+    Players,
+}
 #[derive(Component)]
-pub struct StatsText;
-
+pub struct ReloadBar;
 #[derive(Component)]
-pub struct FpsText;
-
+pub struct PlayersPanel;
 #[derive(Component)]
-pub struct WeaponText;
-
-#[derive(Component)]
-pub struct HelpText;
+pub struct HelpPanel;
 
 /// Case de la barre d'armes.
 #[derive(Component)]
 pub struct HotbarSlot(WeaponId);
 
-#[derive(Component)]
-pub struct HotbarLabel(WeaponId);
+/// Texte d'une case : touche, nom ou stock.
+#[derive(Component, Clone, Copy)]
+pub enum HotbarText {
+    Key(WeaponId),
+    Name(WeaponId),
+    Count(WeaponId),
+}
 
 /// Compteur d'images : moyenne glissante sur une fenêtre fixe.
 #[derive(Resource, Default)]
@@ -38,111 +52,197 @@ pub struct FpsMeter {
     frames: u32,
 }
 
-fn panel() -> impl Bundle {
+fn chip() -> (Node, BackgroundColor) {
     (
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
         Node {
-            position_type: PositionType::Absolute,
-            padding: UiRect::all(px(10)),
-            border_radius: BorderRadius::all(px(6.0)),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::axes(px(14.0), px(10.0)),
+            border_radius: BorderRadius::all(px(10.0)),
             ..default()
         },
+        BackgroundColor(Color::srgba(0.02, 0.025, 0.04, 0.62)),
     )
 }
 
 pub fn setup(mut commands: Commands, font: Res<UiFont>) {
     let font = font.into_inner().clone();
 
-    // Viseur : un point cerclé.
-    commands.spawn((
-        Hud,
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Percent(50.0),
-            top: Val::Percent(50.0),
-            width: px(6),
-            height: px(6),
-            border: UiRect::all(px(1.0)),
-            border_radius: BorderRadius::all(px(3.0)),
-            ..default()
-        },
-        UiTransform::from_translation(Val2::px(-3.0, -3.0)),
-        BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.7)),
-        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.95)),
-    ));
-
-    // Argent, seed, voxels (en haut à gauche).
-    commands
-        .spawn((Hud, panel()))
-        .insert(Node {
-            position_type: PositionType::Absolute,
-            left: px(12),
-            top: px(12),
-            padding: UiRect::all(px(10)),
-            border_radius: BorderRadius::all(px(6.0)),
-            ..default()
-        })
-        .with_child((StatsText, ui::text(&font, "", 17.0, ui::TEXT)));
-
-    // FPS (en haut à droite).
-    commands
-        .spawn((Hud, panel()))
-        .insert(Node {
-            position_type: PositionType::Absolute,
-            right: px(12),
-            top: px(12),
-            padding: UiRect::all(px(8)),
-            border_radius: BorderRadius::all(px(6.0)),
-            ..default()
-        })
-        .with_child((FpsText, ui::text(&font, "", 15.0, ui::TEXT)));
-
-    // Arme en main + munitions (en bas à droite).
-    commands
-        .spawn((Hud, panel()))
-        .insert(Node {
-            position_type: PositionType::Absolute,
-            right: px(16),
-            bottom: px(84),
-            padding: UiRect::all(px(12)),
-            border_radius: BorderRadius::all(px(6.0)),
-            ..default()
-        })
-        .with_child((WeaponText, ui::text(&font, "", 22.0, ui::TEXT), TextLayout::justify(Justify::Right)));
-
-    // Contrôles (en haut au centre, discrets ; H pour masquer).
+    // Viseur : quatre traits et un point, contour sombre pour rester
+    // lisible sur fond clair.
     commands
         .spawn((
             Hud,
             Node {
                 position_type: PositionType::Absolute,
-                top: px(10),
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                width: px(0.0),
+                height: px(0.0),
+                ..default()
+            },
+        ))
+        .with_children(|c| {
+            for (x, y, w, h) in [
+                (-1.0, -12.0, 2.0, 7.0),
+                (-1.0, 5.0, 2.0, 7.0),
+                (-12.0, -1.0, 7.0, 2.0),
+                (5.0, -1.0, 7.0, 2.0),
+                (-1.5, -1.5, 3.0, 3.0),
+            ] {
+                c.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(x),
+                        top: px(y),
+                        width: px(w),
+                        height: px(h),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.92)),
+                    BoxShadow::new(Color::srgba(0.0, 0.0, 0.0, 0.6), px(0.0), px(0.0), px(1.0), px(1.0)),
+                ));
+            }
+            // Gain d'argent, à droite du viseur.
+            c.spawn((
+                HudLabel::Gain,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(22.0),
+                    top: px(-12.0),
+                    ..default()
+                },
+                ui::text(&font, "", 18.0, ui::GREEN),
+            ));
+        });
+
+    // Argent / mode (haut gauche).
+    commands
+        .spawn((
+            Hud,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(16),
+                top: px(16),
+                ..default()
+            },
+        ))
+        .with_children(|p| {
+            p.spawn(chip()).with_children(|c| {
+                c.spawn((HudLabel::Money, ui::text(&font, "", 26.0, ui::TEXT)));
+                c.spawn((HudLabel::Info, ui::text(&font, "", 13.0, ui::MUTED)));
+            });
+        });
+
+    // FPS (haut droite) + joueurs en ligne (Tab).
+    commands
+        .spawn((
+            Hud,
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(16),
+                top: px(16),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: px(8.0),
+                ..default()
+            },
+        ))
+        .with_children(|p| {
+            p.spawn((HudLabel::Fps, ui::text(&font, "", 13.0, Color::srgba(1.0, 1.0, 1.0, 0.6))));
+            p.spawn((PlayersPanel, chip()))
+                .insert(Node {
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::axes(px(16.0), px(12.0)),
+                    border_radius: BorderRadius::all(px(10.0)),
+                    display: Display::None,
+                    ..default()
+                })
+                .with_child((HudLabel::Players, ui::text(&font, "", 15.0, ui::TEXT)));
+        });
+
+    // Aide (haut centre, H pour masquer).
+    commands
+        .spawn((
+            Hud,
+            Node {
+                position_type: PositionType::Absolute,
+                top: px(14),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
                 ..default()
             },
         ))
         .with_child((
-            HelpText,
-            ui::label(&font, "", 13.0, Color::srgba(1.0, 1.0, 1.0, 0.8)),
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
+            HelpPanel,
+            HudLabel::Help,
+            ui::label(&font, "", 13.0, Color::srgba(1.0, 1.0, 1.0, 0.75)),
             Node {
-                padding: UiRect::axes(px(10), px(5)),
-                border_radius: BorderRadius::all(px(6.0)),
+                padding: UiRect::axes(px(12), px(6)),
+                border_radius: BorderRadius::all(px(8.0)),
                 ..default()
             },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.32)),
         ));
 
-    // Barre d'armes (en bas au centre).
+    // Arme en main + munitions (bas droite).
     commands
         .spawn((
             Hud,
             Node {
                 position_type: PositionType::Absolute,
-                bottom: px(16),
+                right: px(20),
+                bottom: px(20),
+                ..default()
+            },
+        ))
+        .with_children(|p| {
+            p.spawn(chip())
+                .insert(Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::FlexEnd,
+                    padding: UiRect::axes(px(18.0), px(12.0)),
+                    border_radius: BorderRadius::all(px(12.0)),
+                    min_width: px(200.0),
+                    ..default()
+                })
+                .with_children(|c| {
+                    c.spawn((HudLabel::WeaponName, ui::text(&font, "", 17.0, ui::MUTED)));
+                    c.spawn((HudLabel::Ammo, ui::text(&font, "", 38.0, ui::TEXT)));
+                    c.spawn((HudLabel::Hint, ui::text(&font, "", 13.0, ui::MUTED)));
+                    c.spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: px(4.0),
+                            margin: UiRect::top(px(6.0)),
+                            border_radius: BorderRadius::all(px(2.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.1)),
+                    ))
+                    .with_child((
+                        ReloadBar,
+                        Node {
+                            width: Val::Percent(0.0),
+                            height: Val::Percent(100.0),
+                            border_radius: BorderRadius::all(px(2.0)),
+                            ..default()
+                        },
+                        BackgroundColor(ui::ACCENT),
+                    ));
+                });
+        });
+
+    // Barre d'armes (bas centre).
+    commands
+        .spawn((
+            Hud,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: px(18),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
-                column_gap: px(4.0),
+                align_items: AlignItems::FlexEnd,
+                column_gap: px(6.0),
                 ..default()
             },
         ))
@@ -151,18 +251,29 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 bar.spawn((
                     HotbarSlot(id),
                     Node {
-                        width: px(74.0),
-                        height: px(52.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
+                        width: px(70.0),
+                        height: px(62.0),
+                        flex_direction: FlexDirection::Column,
+                        justify_content: JustifyContent::SpaceBetween,
+                        padding: UiRect::all(px(6.0)),
                         border: UiRect::all(px(2.0)),
-                        border_radius: BorderRadius::all(px(6.0)),
+                        border_radius: BorderRadius::all(px(10.0)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
-                    BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.1)),
+                    BackgroundColor(Color::srgba(0.02, 0.025, 0.04, 0.6)),
+                    BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.08)),
                 ))
-                .with_child((HotbarLabel(id), ui::label(&font, "", 12.0, ui::TEXT)));
+                .with_children(|s| {
+                    s.spawn(Node {
+                        justify_content: JustifyContent::SpaceBetween,
+                        ..default()
+                    })
+                    .with_children(|top| {
+                        top.spawn((HotbarText::Key(id), ui::text(&font, "", 12.0, ui::MUTED)));
+                        top.spawn((HotbarText::Count(id), ui::text(&font, "", 12.0, ui::ACCENT)));
+                    });
+                    s.spawn((HotbarText::Name(id), ui::text(&font, "", 13.0, ui::TEXT)));
+                });
             }
         });
 }
@@ -193,6 +304,19 @@ fn set(text: &mut Text, value: String) {
     }
 }
 
+/// Sépare les milliers : 12500 → « 12 500 ».
+pub fn thousands(n: u32) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Met à jour l'interface (le texte n'est réécrit que s'il change, pour ne
 /// pas refaire la mise en page à chaque image).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -200,141 +324,204 @@ pub fn update(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mut hide_help: Local<bool>,
+    mut gain: Local<(u32, u32, f32)>,
     world: Res<VoxelWorld>,
     game: Res<GameState>,
     hands: Res<Hands>,
+    lobby: Res<Lobby>,
     net: Res<crate::net::client::NetClient>,
     mut meter: ResMut<FpsMeter>,
     bombs: Query<&Bomb>,
-    mut texts: ParamSet<(
-        Query<&mut Text, With<StatsText>>,
-        Query<&mut Text, With<FpsText>>,
-        Query<&mut Text, With<WeaponText>>,
-        Query<&mut Text, With<HelpText>>,
-        Query<(&HotbarLabel, &mut Text)>,
+    mut labels: Query<(&HudLabel, &mut Text), Without<HotbarText>>,
+    mut slot_texts: Query<(&HotbarText, &mut Text), Without<HudLabel>>,
+    mut nodes: ParamSet<(
+        Query<(&HotbarSlot, &mut Node, &mut BorderColor, &mut BackgroundColor)>,
+        Query<&mut Node, With<ReloadBar>>,
+        Query<&mut Node, With<PlayersPanel>>,
+        Query<&mut Node, With<HelpPanel>>,
     )>,
-    mut slots: Query<(&HotbarSlot, &mut Node, &mut BorderColor, &mut BackgroundColor)>,
 ) {
-    // Haut gauche.
-    let destroyed = world.total.saturating_sub(world.alive);
-    let mut stats = match game.mode {
+    let mut values: Vec<(HudLabel, String)> = Vec::new();
+    // --- Argent / mode ---
+    let money = match game.mode {
         Mode::Sandbox => "BAC À SABLE".to_string(),
-        Mode::Normal => format!("{} $   (gagné : {} $)", game.money, game.earned),
+        Mode::Normal => format!("{} $", thousands(game.money)),
     };
-    stats.push_str(&format!("\nSeed : {}\nVoxels détruits : {}", world.seed, destroyed));
-    if net.is_online() {
-        stats.push_str("\nEn ligne");
+    values.push((HudLabel::Money, money));
+    let destroyed = world.total.saturating_sub(world.alive);
+    let mut info = format!("Seed {} · {} voxels détruits", world.seed, thousands(destroyed));
+    if lobby.active {
+        info.push_str(&format!(" · {} en ligne", lobby.players.len()));
     }
-    if let Ok(mut text) = texts.p0().single_mut() {
-        set(&mut text, stats);
-    }
+    values.push((HudLabel::Info, info));
 
-    // FPS : moyenne sur 0,5 s pour rester lisible.
+    // --- Gain d'argent (« +12 $ ») ---
+    let (last, shown, timer) = &mut *gain;
+    if game.money > *last && game.mode == Mode::Normal {
+        *shown += game.money - *last;
+        *timer = 1.2;
+    }
+    *last = game.money;
+    *timer -= time.delta_secs();
+    if *timer <= 0.0 {
+        *shown = 0;
+    }
+    let gain_text = if *shown > 0 { format!("+{} $", thousands(*shown)) } else { String::new() };
+    values.push((HudLabel::Gain, gain_text));
+
+    // --- FPS : moyenne sur 0,5 s pour rester lisible ---
     meter.elapsed += time.delta_secs();
     meter.frames += 1;
     if meter.elapsed >= 0.5 {
         let average = meter.frames as f32 / meter.elapsed;
-        if let Ok(mut text) = texts.p1().single_mut() {
-            set(&mut text, format!("{:.0} FPS · {:.1} ms", average, 1000.0 / average.max(1.0)));
-        }
+        values.push((HudLabel::Fps, format!("{average:.0} FPS")));
         meter.elapsed = 0.0;
         meter.frames = 0;
     }
 
-    // Arme en main.
+    // --- Arme en main ---
     let id = game.weapon;
     let spec = id.spec();
     let slot = game.slot(id);
     let infinite = game.sandbox();
-    let mut weapon = spec.name.to_string();
-    match spec.kind {
+    let (ammo, hint) = match spec.kind {
         Kind::Gun => {
-            if hands.reload > 0.0 {
-                weapon.push_str("\nRECHARGEMENT…");
-            } else if infinite {
-                weapon.push_str(&format!("\n{} / {}  ·  illimité", slot.mag, spec.mag));
+            let reserve = if infinite { "illimitée".to_string() } else { slot.reserve.to_string() };
+            let hint = if hands.reload > 0.0 {
+                "Rechargement…".to_string()
+            } else if slot.mag == 0 {
+                "R pour recharger".to_string()
             } else {
-                weapon.push_str(&format!("\n{} / {}  ·  {}", slot.mag, spec.mag, slot.reserve));
-            }
+                format!("réserve : {reserve}")
+            };
+            (format!("{} / {}", slot.mag, spec.mag), hint)
         }
         Kind::Thrown | Kind::Placed => {
-            if infinite {
-                weapon.push_str("\nIllimité");
+            let stock = if infinite { "illimité".to_string() } else { format!("× {}", slot.reserve) };
+            let hint = if id == WeaponId::C4 {
+                let placed = bombs.iter().filter(|b| b.local && b.id == WeaponId::C4).count();
+                format!("{placed} posée(s) · clic droit : BOUM")
+            } else if id == WeaponId::MegaBomb {
+                "Minuterie de 8 s : cours !".to_string()
             } else {
-                weapon.push_str(&format!("\nStock : {}", slot.reserve));
-            }
-            if id == WeaponId::C4 {
-                let armed = bombs.iter().filter(|b| b.local && b.id == WeaponId::C4).count();
-                weapon.push_str(&format!("\nPosées : {armed} · clic droit : BOUM"));
-            }
+                "Clic gauche : lancer".to_string()
+            };
+            (stock, hint)
         }
-        Kind::Melee => {}
-    }
-    if let Ok(mut text) = texts.p2().single_mut() {
-        set(&mut text, weapon);
+        Kind::Melee => (
+            format!("{:.1} m", spec.radius),
+            if spec.auto {
+                "Maintiens le clic".to_string()
+            } else {
+                "Rayon de destruction".to_string()
+            },
+        ),
+    };
+    values.push((HudLabel::WeaponName, spec.name.to_string()));
+    values.push((HudLabel::Ammo, ammo));
+    values.push((HudLabel::Hint, hint));
+    if let Ok(mut bar) = nodes.p1().single_mut() {
+        let p = if hands.reload > 0.0 && hands.reload_total > 0.0 {
+            (1.0 - hands.reload / hands.reload_total) * 100.0
+        } else {
+            0.0
+        };
+        let w = Val::Percent(p);
+        if bar.width != w {
+            bar.width = w;
+        }
     }
 
-    // Aide (H la masque / l'affiche).
+    // --- Aide (H la masque) ---
     if keys.just_pressed(KeyCode::KeyH) {
         *hide_help = !*hide_help;
     }
-    let mut help = String::from(
-        "ZQSD/WASD bouger · Maj courir · Espace sauter · Clic agir\n1-9, 0, molette, Q/E changer d'arme · R recharger",
-    );
+    let mut help = String::from("ZQSD bouger · Maj courir · Espace sauter · Clic agir · 1-9 / molette armes · R recharger");
     match game.mode {
         Mode::Normal => help.push_str(" · B boutique"),
         Mode::Sandbox => help.push_str(" · V voler"),
     }
-    if !net.is_online() {
-        help.push_str("\nF5 rejouer la seed · F6 nouvelle ville");
+    if lobby.active {
+        help.push_str(" · Tab joueurs");
+    } else {
+        help.push_str(" · F5/F6 ville");
     }
-    help.push_str(" · Échap menu · H masquer");
-    if *hide_help {
-        help.clear();
-    }
-    if let Ok(mut text) = texts.p3().single_mut() {
-        set(&mut text, help);
+    help.push_str(" · H masquer");
+    values.push((HudLabel::Help, help));
+    if let Ok(mut node) = nodes.p3().single_mut() {
+        let d = if *hide_help { Display::None } else { Display::Flex };
+        if node.display != d {
+            node.display = d;
+        }
     }
 
-    // Barre d'armes : seules les armes possédées, numérotées dans l'ordre.
+    // --- Joueurs en ligne (Tab maintenu) ---
+    let show_players = lobby.active && keys.pressed(KeyCode::Tab);
+    if let Ok(mut node) = nodes.p2().single_mut() {
+        let d = if show_players { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
+        }
+    }
+    if show_players {
+        let mut list = format!("Code : {}\n", crate::menu::lobby_code(&lobby));
+        for (pid, name) in &lobby.players {
+            let host = if *pid == lobby.host_id { "  (hôte)" } else { "" };
+            let me = if Some(*pid) == net.id { "  ← toi" } else { "" };
+            list.push_str(&format!("\n•  {name}{host}{me}"));
+        }
+        values.push((HudLabel::Players, list));
+    }
+
+    // --- Barre d'armes : armes possédées, numérotées dans l'ordre ---
     let owned = game.owned();
-    for (slot_id, mut node, mut border, mut background) in &mut slots {
+    for (slot_id, mut node, mut border, mut background) in &mut nodes.p0() {
         let index = owned.iter().position(|&w| w == slot_id.0);
         let display = if index.is_some() { Display::Flex } else { Display::None };
         if node.display != display {
             node.display = display;
         }
         let selected = slot_id.0 == game.weapon;
-        let b = if selected { ui::ACCENT } else { Color::srgba(1.0, 1.0, 1.0, 0.1) };
+        let b = if selected { ui::ACCENT } else { Color::srgba(1.0, 1.0, 1.0, 0.08) };
         if border.top != b {
             *border = BorderColor::all(b);
         }
         let bg = if selected {
-            Color::srgba(0.25, 0.20, 0.05, 0.7)
+            Color::srgba(0.18, 0.13, 0.03, 0.85)
         } else {
-            Color::srgba(0.0, 0.0, 0.0, 0.5)
+            Color::srgba(0.02, 0.025, 0.04, 0.6)
         };
         if background.0 != bg {
             background.0 = bg;
         }
+        let h = px(if selected { 72.0 } else { 62.0 });
+        if node.height != h {
+            node.height = h;
+        }
     }
-    for (label, mut text) in &mut texts.p4() {
-        let Some(index) = owned.iter().position(|&w| w == label.0) else {
-            continue;
+    for (part, mut t) in &mut slot_texts {
+        let value = match *part {
+            HotbarText::Key(id) => match owned.iter().position(|&w| w == id) {
+                Some(index @ 0..=8) => format!("{}", index + 1),
+                Some(9) => "0".to_string(),
+                _ => String::new(),
+            },
+            HotbarText::Name(id) => short(id).to_string(),
+            HotbarText::Count(id) => {
+                let s = game.slot(id);
+                match id.kind() {
+                    Kind::Gun if !infinite => format!("{}", s.mag + s.reserve),
+                    Kind::Thrown | Kind::Placed if !infinite => format!("×{}", s.reserve),
+                    _ => String::new(),
+                }
+            }
         };
-        let key = if index < 9 {
-            format!("{}", index + 1)
-        } else if index == 9 {
-            "0".to_string()
-        } else {
-            "·".to_string()
-        };
-        let s = game.slot(label.0);
-        let count = match label.0.kind() {
-            Kind::Gun if !infinite => format!("\n{}", s.mag + s.reserve),
-            Kind::Thrown | Kind::Placed if !infinite => format!("\n×{}", s.reserve),
-            _ => String::new(),
-        };
-        set(&mut text, format!("{key}  {}{count}", short(label.0)));
+        set(&mut t, value);
+    }
+
+    for (label, mut t) in &mut labels {
+        if let Some((_, v)) = values.iter().find(|(l, _)| l == label) {
+            set(&mut t, v.clone());
+        }
     }
 }

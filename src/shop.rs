@@ -12,8 +12,6 @@ use crate::ui::{self, UiFont};
 #[derive(Resource, Default)]
 pub struct ShopState {
     pub open: bool,
-    message: String,
-    message_time: f32,
 }
 
 #[derive(Component)]
@@ -23,24 +21,48 @@ pub struct ShopBuy(WeaponId);
 #[derive(Component)]
 pub struct ShopAmmo(WeaponId);
 #[derive(Component)]
-pub struct BuyLabel(WeaponId);
-#[derive(Component)]
-pub struct AmmoLabel(WeaponId);
-#[derive(Component)]
-pub struct InfoLabel(WeaponId);
-#[derive(Component)]
-pub struct ShopMoney;
-#[derive(Component)]
-pub struct ShopMessage;
-#[derive(Component)]
 pub struct ShopClose;
+#[derive(Component)]
+pub struct ShopCard(WeaponId);
 
-fn category(kind: Kind) -> &'static str {
+/// Textes de la boutique mis à jour chaque image.
+#[derive(Component, Clone, Copy, PartialEq)]
+pub enum ShopLabel {
+    Money,
+    Buy(WeaponId),
+    Ammo(WeaponId),
+    State(WeaponId),
+}
+
+fn category(kind: Kind) -> (&'static str, Color) {
     match kind {
-        Kind::Melee => "Marteau",
-        Kind::Gun => "Arme à feu",
-        Kind::Thrown => "Bombe lancée",
-        Kind::Placed => "Bombe posée",
+        Kind::Melee => ("MARTEAU", ui::ACCENT),
+        Kind::Gun => ("ARME À FEU", ui::BLUE),
+        Kind::Thrown => ("BOMBE LANCÉE", ui::HOT),
+        Kind::Placed => ("BOMBE POSÉE", ui::RED),
+    }
+}
+
+/// Petite ligne de caractéristiques.
+fn stats(id: WeaponId) -> String {
+    let s = id.spec();
+    match s.kind {
+        Kind::Melee => format!("Rayon {:.1} m · {:.2} s par coup", s.radius, s.cooldown),
+        Kind::Gun if id == WeaponId::Rocket => format!("Explosion {:.1} m · portée {:.0} m", s.radius, s.reach),
+        Kind::Gun => {
+            let mut t = format!("Chargeur {} · portée {:.0} m", s.mag, s.reach);
+            if s.pellets > 1 {
+                t.push_str(&format!(" · {} plombs", s.pellets));
+            }
+            if s.pierce > 0 {
+                t.push_str(" · traverse");
+            }
+            if s.auto {
+                t.push_str(" · auto");
+            }
+            t
+        }
+        Kind::Thrown | Kind::Placed => format!("Explosion {:.1} m", s.radius),
     }
 }
 
@@ -55,94 +77,122 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 height: Val::Percent(100.0),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
+                display: Display::None,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+            BackgroundColor(Color::srgba(0.01, 0.015, 0.03, 0.72)),
             GlobalZIndex(50),
-            Visibility::Hidden,
         ))
         .with_children(|root| {
             root.spawn((
                 Node {
-                    width: px(860.0),
+                    width: px(1120.0),
                     flex_direction: FlexDirection::Column,
-                    row_gap: px(4.0),
-                    padding: UiRect::all(px(18.0)),
-                    border_radius: BorderRadius::all(px(10.0)),
+                    row_gap: px(14.0),
+                    padding: UiRect::all(px(24.0)),
+                    border: UiRect::all(px(1.0)),
+                    border_radius: BorderRadius::all(px(16.0)),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.06, 0.07, 0.10, 0.97)),
+                BackgroundColor(ui::PANEL),
+                BorderColor::all(ui::LINE),
+                BoxShadow::new(Color::srgba(0.0, 0.0, 0.0, 0.6), px(0.0), px(10.0), px(0.0), px(30.0)),
             ))
             .with_children(|panel| {
                 panel
                     .spawn(Node {
-                        justify_content: JustifyContent::SpaceBetween,
                         align_items: AlignItems::Center,
-                        margin: UiRect::bottom(px(8.0)),
+                        column_gap: px(16.0),
                         ..default()
                     })
                     .with_children(|row| {
-                        row.spawn(ui::text(&font, "BOUTIQUE", 30.0, ui::ACCENT));
-                        row.spawn((ShopMoney, ui::text(&font, "", 26.0, Color::srgb(0.45, 0.95, 0.45))));
-                        row.spawn((ShopClose, ui::button(130.0, 36.0, ui::BUTTON)))
+                        row.spawn(ui::text(&font, "BOUTIQUE", 34.0, ui::ACCENT));
+                        row.spawn((
+                            Node {
+                                flex_grow: 1.0,
+                                ..default()
+                            },
+                            ui::text(&font, "Chaque voxel cassé rapporte de l'argent (le sol ne vaut rien).", 14.0, ui::MUTED),
+                        ));
+                        row.spawn((
+                            Node {
+                                padding: UiRect::axes(px(16.0), px(6.0)),
+                                border_radius: BorderRadius::all(px(8.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgba(0.1, 0.3, 0.16, 0.6)),
+                        ))
+                        .with_child((ShopLabel::Money, ui::text(&font, "", 26.0, ui::GREEN)));
+                        row.spawn((ShopClose, ui::button(130.0, 40.0, ui::BUTTON)))
                             .with_child(ui::label(&font, "Fermer (B)", 16.0, ui::TEXT));
                     });
 
-                for &id in &ALL_WEAPONS {
-                    let spec = id.spec();
-                    panel
-                        .spawn(Node {
-                            height: px(42.0),
-                            align_items: AlignItems::Center,
-                            column_gap: px(10.0),
-                            padding: UiRect::horizontal(px(8.0)),
-                            ..default()
-                        })
-                        .insert(BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.03)))
-                        .with_children(|row| {
-                            row.spawn((
+                panel
+                    .spawn(Node {
+                        flex_wrap: FlexWrap::Wrap,
+                        column_gap: px(12.0),
+                        row_gap: px(12.0),
+                        ..default()
+                    })
+                    .with_children(|grid| {
+                        for &id in &ALL_WEAPONS {
+                            let spec = id.spec();
+                            let (cat, color) = category(spec.kind);
+                            grid.spawn((
+                                ShopCard(id),
                                 Node {
-                                    width: px(190.0),
+                                    width: px(257.0),
+                                    height: px(138.0),
+                                    flex_direction: FlexDirection::Column,
+                                    padding: UiRect::all(px(12.0)),
+                                    row_gap: px(4.0),
+                                    border: UiRect::all(px(1.0)),
+                                    border_radius: BorderRadius::all(px(10.0)),
                                     ..default()
                                 },
-                                ui::text(&font, spec.name, 19.0, ui::TEXT),
-                            ));
-                            row.spawn((
-                                InfoLabel(id),
-                                Node {
-                                    width: px(250.0),
+                                BackgroundColor(ui::CARD),
+                                BorderColor::all(ui::LINE),
+                            ))
+                            .with_children(|c| {
+                                c.spawn(Node {
+                                    justify_content: JustifyContent::SpaceBetween,
+                                    align_items: AlignItems::Center,
                                     ..default()
-                                },
-                                ui::text(&font, category(spec.kind), 14.0, ui::MUTED),
-                            ));
-                            row.spawn((ShopBuy(id), ui::button(180.0, 34.0, Color::srgba(0.12, 0.30, 0.16, 0.96))))
-                                .with_child((BuyLabel(id), ui::label(&font, "", 16.0, ui::TEXT)));
-                            if spec.kind == Kind::Gun {
-                                row.spawn((ShopAmmo(id), ui::button(170.0, 34.0, Color::srgba(0.24, 0.22, 0.10, 0.96))))
-                                    .with_child((AmmoLabel(id), ui::label(&font, "", 15.0, ui::TEXT)));
-                            } else {
-                                // Garde les boutons « Acheter » alignés.
-                                row.spawn(Node {
-                                    width: px(170.0),
+                                })
+                                .with_children(|r| {
+                                    r.spawn(ui::text(&font, spec.name, 18.0, ui::TEXT));
+                                    r.spawn(ui::text(&font, cat, 10.0, color));
+                                });
+                                c.spawn(ui::text(&font, stats(id), 12.0, ui::MUTED));
+                                c.spawn((ShopLabel::State(id), ui::text(&font, "", 13.0, ui::GREEN)));
+                                c.spawn(Node {
+                                    flex_grow: 1.0,
                                     ..default()
                                 });
-                            }
-                        });
-                }
-
-                panel.spawn((
-                    ShopMessage,
-                    Node {
-                        margin: UiRect::top(px(8.0)),
-                        ..default()
-                    },
-                    ui::text(&font, "", 17.0, Color::srgb(1.0, 0.6, 0.5)),
-                ));
+                                c.spawn(Node {
+                                    column_gap: px(6.0),
+                                    ..default()
+                                })
+                                .with_children(|r| {
+                                    let wide = spec.kind != Kind::Gun;
+                                    r.spawn((
+                                        ShopBuy(id),
+                                        ui::button(if wide { 232.0 } else { 118.0 }, 34.0, Color::srgba(0.13, 0.36, 0.20, 1.0)),
+                                    ))
+                                    .with_child((ShopLabel::Buy(id), ui::label(&font, "", 14.0, ui::TEXT)));
+                                    if !wide {
+                                        r.spawn((ShopAmmo(id), ui::button(108.0, 34.0, Color::srgba(0.30, 0.25, 0.08, 1.0))))
+                                            .with_child((ShopLabel::Ammo(id), ui::label(&font, "", 13.0, ui::TEXT)));
+                                    }
+                                });
+                            });
+                        }
+                    });
             });
         });
 }
 
-/// Ouvre / ferme la boutique (`B`, `Tab`, `Échap` pour fermer).
+/// Ouvre / ferme la boutique (`B`, `Échap` pour fermer).
 pub fn toggle(
     keys: Res<ButtonInput<KeyCode>>,
     game: Res<GameState>,
@@ -152,12 +202,12 @@ pub fn toggle(
 ) {
     if !game.in_game() || game.mode != Mode::Normal {
         if shop.open {
-                shop.open = false;
+            shop.open = false;
         }
         return;
     }
     let mut wanted = shop.open;
-    if keys.just_pressed(KeyCode::KeyB) || keys.just_pressed(KeyCode::Tab) {
+    if keys.just_pressed(KeyCode::KeyB) {
         wanted = !wanted;
     }
     if shop.open && (keys.just_pressed(KeyCode::Escape) || !close.is_empty()) {
@@ -171,24 +221,24 @@ pub fn toggle(
 
 /// Achats.
 pub fn interact(
-    time: Res<Time>,
     mut commands: Commands,
     bank: Res<SfxBank>,
     mut game: ResMut<GameState>,
-    mut shop: ResMut<ShopState>,
+    shop: Res<ShopState>,
+    mut toasts: ResMut<ui::Toasts>,
     buy: Query<&ShopBuy, Added<Pressed>>,
     ammo: Query<&ShopAmmo, Added<Pressed>>,
 ) {
-    shop.message_time = (shop.message_time - time.delta_secs()).max(0.0);
     if !shop.open {
         return;
     }
     let mut result: Option<Result<String, &'static str>> = None;
     for ShopBuy(id) in &buy {
-        result = Some(game.buy(*id).map(|_| format!("{} acheté !", id.spec().name)));
-        if result.as_ref().is_some_and(|r| r.is_ok()) && !id.is_bomb() {
+        let r = game.buy(*id).map(|_| format!("{} acheté !", id.spec().name));
+        if r.is_ok() && !id.is_bomb() {
             game.weapon = *id;
         }
+        result = Some(r);
     }
     for ShopAmmo(id) in &ammo {
         result = Some(
@@ -199,83 +249,81 @@ pub fn interact(
     match result {
         Some(Ok(msg)) => {
             fx::play(&mut commands, &bank, SfxKind::Buy, 0.6);
-            shop.message = msg;
-            shop.message_time = 2.5;
+            toasts.push(msg);
         }
         Some(Err(e)) => {
             fx::play(&mut commands, &bank, SfxKind::Empty, 0.6);
-            shop.message = e.to_string();
-            shop.message_time = 2.5;
+            toasts.push(format!("Impossible : {e}"));
         }
         None => {}
     }
 }
 
-/// Met à jour les libellés (prix, possédé, stock).
-#[allow(clippy::type_complexity)]
+/// Met à jour les libellés (prix, possédé, stock) et l'affichage.
 pub fn refresh(
     game: Res<GameState>,
     shop: Res<ShopState>,
-    mut root: Query<&mut Visibility, With<ShopRoot>>,
-    mut texts: ParamSet<(
-        Query<(&BuyLabel, &mut Text)>,
-        Query<(&AmmoLabel, &mut Text)>,
-        Query<(&InfoLabel, &mut Text)>,
-        Query<&mut Text, With<ShopMoney>>,
-        Query<&mut Text, With<ShopMessage>>,
-    )>,
+    mut root: Query<&mut Node, With<ShopRoot>>,
+    mut labels: Query<(&ShopLabel, &mut Text, &mut TextColor)>,
+    mut cards: Query<(&ShopCard, &mut BorderColor)>,
 ) {
-    if let Ok(mut v) = root.single_mut() {
-        let wanted = if shop.open { Visibility::Inherited } else { Visibility::Hidden };
-        if *v != wanted {
-            *v = wanted;
+    if let Ok(mut node) = root.single_mut() {
+        let d = if shop.open { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
         }
     }
     if !shop.open {
         return;
     }
-
-    let set = |text: &mut Text, value: String| {
+    for (card, mut border) in &mut cards {
+        let owned = game.slot(card.0).owned && !card.0.is_bomb();
+        let c = if card.0 == game.weapon && owned {
+            ui::ACCENT
+        } else if owned {
+            Color::srgba(0.24, 0.86, 0.52, 0.35)
+        } else {
+            ui::LINE
+        };
+        if border.top != c {
+            *border = BorderColor::all(c);
+        }
+    }
+    for (label, mut text, mut color) in &mut labels {
+        let (value, c) = match *label {
+            ShopLabel::Money => (format!("{} $", crate::hud::thousands(game.money)), ui::GREEN),
+            ShopLabel::Buy(id) => {
+                let spec = id.spec();
+                let affordable = game.money >= spec.price;
+                let value = if id.is_bomb() {
+                    format!("+1   {} $", spec.price)
+                } else if game.slot(id).owned {
+                    "Possédé".to_string()
+                } else {
+                    format!("{} $", crate::hud::thousands(spec.price))
+                };
+                (value, if affordable || game.slot(id).owned { ui::TEXT } else { ui::MUTED })
+            }
+            ShopLabel::Ammo(id) => {
+                let spec = id.spec();
+                (format!("+{}  {} $", spec.ammo_pack, spec.ammo_price), ui::TEXT)
+            }
+            ShopLabel::State(id) => {
+                let slot = game.slot(id);
+                let value = match id.kind() {
+                    Kind::Gun if slot.owned => format!("Munitions : {} + {}", slot.mag, slot.reserve),
+                    Kind::Thrown | Kind::Placed if slot.reserve > 0 => format!("En stock : {}", slot.reserve),
+                    _ if slot.owned => "Dans ton arsenal".to_string(),
+                    _ => String::new(),
+                };
+                (value, ui::GREEN)
+            }
+        };
         if text.0 != value {
             text.0 = value;
         }
-    };
-
-    for (BuyLabel(id), mut text) in &mut texts.p0() {
-        let spec = id.spec();
-        let slot = game.slot(*id);
-        let value = if id.is_bomb() {
-            format!("+1  —  {} $", spec.price)
-        } else if slot.owned {
-            "Possédé".to_string()
-        } else {
-            format!("Acheter  —  {} $", spec.price)
-        };
-        set(&mut text, value);
-    }
-    for (AmmoLabel(id), mut text) in &mut texts.p1() {
-        let spec = id.spec();
-        set(&mut text, format!("+{} balles — {} $", spec.ammo_pack, spec.ammo_price));
-    }
-    for (InfoLabel(id), mut text) in &mut texts.p2() {
-        let spec = id.spec();
-        let slot = game.slot(*id);
-        let value = match spec.kind {
-            Kind::Gun if slot.owned => format!("{} · {} / {}", category(spec.kind), slot.mag, slot.reserve),
-            Kind::Thrown | Kind::Placed => format!("{} · stock {}", category(spec.kind), slot.reserve),
-            _ => format!("{} · rayon {:.1} m", category(spec.kind), spec.radius),
-        };
-        set(&mut text, value);
-    }
-    if let Ok(mut text) = texts.p3().single_mut() {
-        set(&mut text, format!("{} $", game.money));
-    }
-    if let Ok(mut text) = texts.p4().single_mut() {
-        let value = if shop.message_time > 0.0 {
-            shop.message.clone()
-        } else {
-            "Chaque voxel détruit rapporte de l'argent (le sol ne vaut rien).".to_string()
-        };
-        set(&mut text, value);
+        if color.0 != c {
+            color.0 = c;
+        }
     }
 }
