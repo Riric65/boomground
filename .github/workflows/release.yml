@@ -1,10 +1,10 @@
-# Construit le jeu (un seul fichier, qui s'installe lui-même) pour Windows,
-# Linux et macOS.
+# Construit le jeu pour Windows (BoomGround-Setup.exe) et Linux
+# (BoomGround-x86_64.AppImage).
 #
-# - À chaque push / pull request : les trois versions sont compilées et
+# - À chaque push / pull request : les deux versions sont compilées et
 #   téléchargeables dans l'onglet « Actions » (artefacts).
 # - Sur un tag `v*` (ex. `git tag v1.0.0 && git push --tags`) : une release
-#   GitHub est créée avec les installateurs en pièces jointes.
+#   GitHub est créée avec les fichiers en pièces jointes.
 name: release
 
 on:
@@ -26,9 +26,7 @@ jobs:
           - os: windows-latest
             script: powershell -ExecutionPolicy Bypass -File scripts/package.ps1
           - os: ubuntu-22.04
-            script: sh scripts/package.sh
-          - os: macos-14
-            script: sh scripts/package.sh
+            script: sh scripts/package-appimage.sh
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +36,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+            curl pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
       - uses: dtolnay/rust-toolchain@stable
 

@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn lobby_info_round_trip() {
         let info = LobbyInfo {
-            name: "Partie de Victor | test".into(),
+            name: "Partie de L3Lunee | test".into(),
             port: 28431,
             players: 3,
             max: 16,

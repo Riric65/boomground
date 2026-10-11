@@ -10,8 +10,7 @@ Destruction de voxels façon Teardown, en Rust + Bevy. **Tout est destructible**
 | Système | Fichier |
 |---|---|
 | Windows | `BoomGround-Setup.exe` |
-| Linux | `BoomGround-Setup-Linux` |
-| macOS | `BoomGround-macOS.zip` (contient `BoomGround.app`) |
+| Linux | `BoomGround-x86_64.AppImage` (`chmod +x` puis double-clic) |
 
 Au premier lancement, le jeu affiche son propre écran d'installation :
 - **Installer** : le jeu se copie dans le dossier des programmes de l'utilisateur, sans
@@ -150,7 +149,7 @@ Construire le fichier à distribuer :
 
 ```bash
 powershell -ExecutionPolicy Bypass -File scripts/package.ps1   # Windows → dist/BoomGround-Setup.exe
-sh scripts/package.sh                                          # Linux / macOS
+sh scripts/package-appimage.sh                                 # Linux → dist/BoomGround-x86_64.AppImage
 ```
 
 Le workflow GitHub `.github/workflows/release.yml` construit les trois systèmes à chaque
@@ -179,3 +178,7 @@ avec `BOOM_WEAPON=rifle`, `BOOM_MODE=normal`, `BOOM_SEED=42`, `BOOM_SHOP=1`, `BO
 | `install.rs` | auto-installation (raccourcis, pare-feu, désinstallation) |
 | `fx.rs` | sons synthétisés, secousse, flashs, boules de feu |
 | `net/` | protocole et codes de partie, client, serveur de lobby (en fond ou dédié), découverte réseau local (`lan`), ouverture du port de la box (`upnp`) |
+
+## Licence
+
+Tous droits réservés : voir [LICENSE](LICENSE). Copie, modification et redistribution interdites sans autorisation.

@@ -503,7 +503,7 @@ mod tests {
             Packet::Refused { reason: "pleine".into() },
             Packet::Roster {
                 host: 1,
-                players: vec![(1, "Victor".into()), (2, "Sam".into())],
+                players: vec![(1, "L3Lunee".into()), (2, "Sam".into())],
             },
             Packet::Start,
             Packet::Voxels {
