@@ -1,0 +1,19 @@
+[package]
+name = "boomground"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# "wav" : les bruitages sont synthétisés à la volée puis encodés en WAV, ce qui
+# évite d'embarquer des fichiers audio.
+bevy = { version = "0.20", features = ["wav"] }
+
+# Bevy est long à compiler en debug : on optimise les dépendances pour que le
+# jeu reste fluide, sans debuginfo sur elles (économie de mémoire au build).
+[profile.dev]
+opt-level = 1
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false

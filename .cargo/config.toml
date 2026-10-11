@@ -1,0 +1,8 @@
+# 7.6 Go de RAM : limiter les rustc concurrents évite les OOM (SIGKILL) au build.
+[build]
+jobs = 4
+
+# Racine des assets : <racine du projet>/assets, même en lançant le binaire
+# directement (sinon Bevy cherche à côté de l'exécutable).
+[env]
+BEVY_ASSET_ROOT = { value = ".", relative = true }
