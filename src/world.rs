@@ -146,6 +146,8 @@ pub struct VoxelWorld {
     dirty_chunks: HashSet<IVec3>,
     /// Portes (interactives) générées avec la carte.
     pub doors: Vec<Door>,
+    /// Voitures garées : coin minimal de leur boîte (5 × 6 × 11 voxels).
+    pub cars: Vec<IVec3>,
 }
 
 /// Une porte : ses voxels passent de `closed` à `open` (et inversement),
@@ -199,6 +201,7 @@ impl VoxelWorld {
             full_rebuild: true,
             dirty_chunks: HashSet::new(),
             doors: Vec::new(),
+            cars: Vec::new(),
         }
     }
 
@@ -559,6 +562,7 @@ impl VoxelWorld {
     pub fn clear(&mut self) {
         self.chunks.iter_mut().for_each(|c| *c = None);
         self.doors.clear();
+        self.cars.clear();
         self.alive = 0;
         self.total = 0;
         self.dirty_chunks.clear();

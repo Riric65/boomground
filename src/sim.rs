@@ -173,6 +173,26 @@ pub struct Body {
     samples: Vec<Vec3>,
     rest: f32,
     cooldown: f32,
+    /// Véhicule conduisible (voiture).
+    pub vehicle: Option<Vehicle>,
+}
+
+/// Commandes et état d'un véhicule.
+#[derive(Clone, Debug)]
+pub struct Vehicle {
+    /// Voxels d'origine (l'état général se déduit de ce qui reste).
+    pub orig: usize,
+    pub throttle: f32,
+    pub steer: f32,
+    pub brake: bool,
+    /// Durée de validité de la dernière commande.
+    pub ttl: f32,
+    /// Au sol au dernier pas (les roues touchent).
+    pub grounded: bool,
+    /// Moteur en état de marche.
+    pub alive: bool,
+    /// Vitesse (m/s), pour le moteur sonore.
+    pub speed: f32,
 }
 
 impl Body {
@@ -329,6 +349,36 @@ impl Sim {
         self.bodies.iter().find(|b| b.id == id)
     }
 
+    pub fn body_mut(&mut self, id: u32) -> Option<&mut Body> {
+        self.bodies.iter_mut().find(|b| b.id == id)
+    }
+
+    /// Transforme des voxels (déjà retirés du monde) en véhicule.
+    pub fn form_vehicle(&mut self, world: &VoxelWorld, cells: Vec<IVec3>) -> Option<u32> {
+        if cells.len() < 20 {
+            return None;
+        }
+        let orig = cells.len();
+        let mut ev = Vec::new();
+        let before = self.bodies.len();
+        self.form_bodies(world, vec![cells], &mut ev);
+        if self.bodies.len() == before {
+            return None;
+        }
+        let body = self.bodies.last_mut()?;
+        body.vehicle = Some(Vehicle {
+            orig,
+            throttle: 0.0,
+            steer: 0.0,
+            brake: false,
+            ttl: 0.0,
+            grounded: false,
+            alive: true,
+            speed: 0.0,
+        });
+        Some(body.id)
+    }
+
     // ------------------------------------------------------------------
     // Création
     // ------------------------------------------------------------------
@@ -453,6 +503,7 @@ impl Sim {
                 samples: Vec::new(),
                 rest: 0.0,
                 cooldown: 0.0,
+                vehicle: None,
             };
             // `pos` désigne le coin ; `recompute` ramène au centre de masse.
             body.com = Vec3::ZERO;
@@ -632,6 +683,43 @@ impl Sim {
         for (bi, body) in self.bodies.iter_mut().enumerate() {
             body.cooldown = (body.cooldown - dt).max(0.0);
             body.lin.y -= GRAVITY * dt;
+
+            // Véhicule : poussée des roues, adhérence latérale, direction.
+            let mut fwd_h = Vec3::ZERO;
+            if let Some(v) = body.vehicle.as_mut() {
+                v.ttl -= dt;
+                let fwd = body.rot * Vec3::NEG_Z;
+                fwd_h = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+                let right = Vec3::new(-fwd_h.z, 0.0, fwd_h.x);
+                let speed_f = body.lin.dot(fwd_h);
+                v.speed = body.lin.length();
+                if v.grounded {
+                    // Adhérence : la voiture ne glisse pas de côté.
+                    let lat = body.lin.dot(right);
+                    body.lin -= right * lat * (1.0 - (-9.0 * dt).exp());
+                    if v.ttl > 0.0 && v.alive {
+                        let mut acc = v.throttle * 16.0;
+                        if (v.throttle > 0.0 && speed_f > 26.0) || (v.throttle < 0.0 && speed_f < -9.0) {
+                            acc = 0.0;
+                        }
+                        body.lin += fwd_h * acc * dt;
+                        let rate = v.steer * 1.8 * (speed_f / 6.0).clamp(-1.0, 1.0);
+                        body.ang.y += (rate - body.ang.y) * (1.0 - (-8.0 * dt).exp());
+                        if v.brake {
+                            let k = (-4.0 * dt).exp();
+                            body.lin.x *= k;
+                            body.lin.z *= k;
+                        }
+                    } else {
+                        // Moteur coupé : frein moteur léger.
+                        let k = (-0.35 * dt).exp();
+                        body.lin.x *= k;
+                        body.lin.z *= k;
+                    }
+                }
+                // Intégrité : en dessous de 60 % des voxels, il ne roule plus.
+                v.alive = body.grid.count() * 100 >= v.orig * 60;
+            }
             body.pos += body.lin * dt;
             let w = body.ang * dt;
             let angle = w.length();
@@ -705,7 +793,12 @@ impl Sim {
                         body.ang += inv_world * (c.r.cross(c.n * j));
                         // Frottement de Coulomb.
                         let vel = body.lin + body.ang.cross(c.r);
-                        let vt = vel - c.n * vel.dot(c.n);
+                        let mut vt = vel - c.n * vel.dot(c.n);
+                        // Roues : elles roulent librement dans le sens de la
+                        // marche, seul le dérapage latéral est freiné.
+                        if body.vehicle.is_some() {
+                            vt -= fwd_h * vt.dot(fwd_h);
+                        }
                         let vt_len = vt.length();
                         if vt_len > 1e-4 {
                             let t = vt / vt_len;
@@ -721,13 +814,16 @@ impl Sim {
                     body.cooldown = 0.12;
                     breaks.push((bi, worst_point, worst_speed));
                     // Gros morceau + gros choc : il se brise en plusieurs.
-                    if worst_speed > 6.0 && body.grid.dims.max_element() > 14 {
+                    if worst_speed > 6.0 && body.grid.dims.max_element() > 14 && body.vehicle.is_none() {
                         fracture_ids.push(body.id);
                     }
                 }
                 // Amortissement au contact : un corps posé s'immobilise.
                 body.lin *= 1.0 - 2.5 * dt;
                 body.ang *= 1.0 - 5.0 * dt;
+                if let Some(v) = body.vehicle.as_mut() {
+                    v.grounded = true;
+                }
                 body.rest = if body.lin.length() < 0.6 && body.ang.length() < 0.5 {
                     body.rest + dt
                 } else {
@@ -735,10 +831,14 @@ impl Sim {
                 };
             } else {
                 body.rest = 0.0;
+                if let Some(v) = body.vehicle.as_mut() {
+                    v.grounded = false;
+                }
             }
             body.lin *= 1.0 - 0.01 * dt * 60.0;
             body.ang *= 1.0 - 0.06 * dt * 60.0;
-            if body.rest > 0.5 {
+            // Un véhicule reste un corps : il ne se fige ni ne se brise seul.
+            if body.rest > 0.5 && body.vehicle.is_none() {
                 settle.push(bi);
             }
             if body.pos.y < -20.0 {
@@ -896,6 +996,7 @@ impl Sim {
                         samples: Vec::new(),
                         rest: 0.0,
                         cooldown: 0.3,
+                        vehicle: None,
                     };
                     if nb.recompute() {
                         new_bodies.push(nb);
@@ -1043,6 +1144,7 @@ impl Sim {
                         samples: Vec::new(),
                         rest: 0.0,
                         cooldown: 0.0,
+                        vehicle: None,
                     };
                     if temp.recompute() {
                         let ids = self.body_to_rubble(&temp);
@@ -1070,6 +1172,7 @@ impl Sim {
                     samples: Vec::new(),
                     rest: 0.0,
                     cooldown: 0.25,
+                    vehicle: None,
                 };
                 if nb.recompute() {
                     ev.push(SimEvent::BodyChanged(new_id));
@@ -1431,6 +1534,7 @@ impl Sim {
                 samples: Vec::new(),
                 rest: 0.0,
                 cooldown: 0.0,
+                vehicle: None,
             };
             // `pos` sauvegardé est déjà celui du centre de masse : on
             // recalcule la grille sans décaler.
@@ -1574,6 +1678,50 @@ mod tests {
             sim.blocks.len()
         );
         assert!(sim.bodies.is_empty(), "tout s'est figé en {steps} pas");
+    }
+
+    #[test]
+    fn vehicle_drives_forward_and_can_be_wrecked() {
+        let mut w = flat_world();
+        let mut sim = Sim::new();
+        let mut cells = Vec::new();
+        // Boîte de voiture 5 × 3 × 11 posée sur le sol (y = 6).
+        for x in 50..55 {
+            for y in 6..9 {
+                for z in 50..61 {
+                    cells.push(IVec3::new(x, y, z));
+                    w.set(IVec3::new(x, y, z), true, mat::METAL);
+                }
+            }
+        }
+        for &c in &cells {
+            w.set(c, false, 0);
+        }
+        let id = sim.form_vehicle(&w, cells).expect("véhicule");
+        let start = sim.body(id).unwrap().pos;
+        let mut ev = Vec::new();
+        for _ in 0..180 {
+            if let Some(b) = sim.body_mut(id) {
+                let v = b.vehicle.as_mut().unwrap();
+                v.throttle = 1.0;
+                v.ttl = 0.3;
+            }
+            sim.step(&mut w, 1.0 / 60.0, &mut ev);
+        }
+        let b = sim.body(id).expect("toujours un corps");
+        let moved = (b.pos - start).length();
+        assert!(moved > 8.0, "la voiture avance : {moved:.1} m");
+        assert!(b.pos.y < start.y + 1.0, "reste au sol");
+        // Sans voxels, plus de moteur.
+        let mut b = b.clone();
+        for x in 0..b.grid.dims.x {
+            for y in 0..b.grid.dims.y {
+                for z in 0..b.grid.dims.z / 2 + 1 {
+                    b.grid.set(IVec3::new(x, y, z), None);
+                }
+            }
+        }
+        assert!(b.grid.count() * 100 < 60 * 165, "épave");
     }
 
     #[test]

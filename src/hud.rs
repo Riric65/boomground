@@ -32,6 +32,8 @@ pub struct ReloadBar;
 #[derive(Component)]
 pub struct PlayersPanel;
 #[derive(Component)]
+pub struct CatChip(pub crate::game::Cat);
+#[derive(Component)]
 pub struct HpBar;
 #[derive(Component)]
 pub struct HpPanel;
@@ -319,6 +321,34 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 });
         });
 
+    // Catégories d'armes (au-dessus de la barre).
+    commands
+        .spawn((
+            Hud,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: px(96),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                column_gap: px(6.0),
+                ..default()
+            },
+        ))
+        .with_children(|row| {
+            for (i, cat) in crate::game::Cat::ALL.iter().enumerate() {
+                row.spawn((
+                    CatChip(*cat),
+                    Node {
+                        padding: UiRect::axes(px(10.0), px(3.0)),
+                        border_radius: BorderRadius::all(px(7.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.02, 0.025, 0.04, 0.6)),
+                    ui::text(&font, format!("{} {}", i + 1, cat.name()), 13.0, ui::MUTED),
+                ));
+            }
+        });
+
     // Barre d'armes (bas centre).
     commands
         .spawn((
@@ -365,32 +395,6 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
         });
 }
 
-/// Nom court pour la barre d'armes.
-fn short(id: WeaponId) -> &'static str {
-    use WeaponId::*;
-    match id {
-        Hammer => "Marteau",
-        Sledge => "Masse",
-        WarHammer => "Guerre",
-        Jackhammer => "Piqueur",
-        Glock => "Glock",
-        Shotgun => "Pompe",
-        Rifle => "Fusil",
-        Sniper => "Sniper",
-        Rocket => "Roquette",
-        Grenade => "Grenade",
-        Dynamite => "Dynamite",
-        C4 => "C4",
-        MegaBomb => "Méga",
-        Pickaxe => "Pioche",
-        Revolver => "Revolver",
-        Smg => "PM",
-        Minigun => "Minigun",
-        Railgun => "Rail",
-        Blocks => "Blocs",
-    }
-}
-
 fn set(text: &mut Text, value: String) {
     if text.0 != value {
         text.0 = value;
@@ -425,8 +429,9 @@ pub fn update(
     net: Res<crate::net::client::NetClient>,
     mut meter: ResMut<FpsMeter>,
     bombs: Query<&Bomb>,
-    mut labels: Query<(&HudLabel, &mut Text), Without<HotbarText>>,
-    mut slot_texts: Query<(&HotbarText, &mut Text), Without<HudLabel>>,
+    mut labels: Query<(&HudLabel, &mut Text), (Without<HotbarText>, Without<CatChip>)>,
+    mut chips: Query<(&CatChip, &mut Text, &mut TextColor, &mut BackgroundColor), (Without<HudLabel>, Without<HotbarSlot>)>,
+    mut slot_texts: Query<(&HotbarText, &mut Text), (Without<HudLabel>, Without<CatChip>)>,
     mut nodes: ParamSet<(
         Query<(&HotbarSlot, &mut Node, &mut BorderColor, &mut BackgroundColor)>,
         Query<&mut Node, With<ReloadBar>>,
@@ -496,11 +501,13 @@ pub fn update(
         }
         Kind::Thrown | Kind::Placed => {
             let stock = if infinite { "illimité".to_string() } else { format!("× {}", slot.reserve) };
-            let hint = if id == WeaponId::C4 {
-                let placed = bombs.iter().filter(|b| b.local && b.id == WeaponId::C4).count();
+            let hint = if spec.remote {
+                let placed = bombs.iter().filter(|b| b.local && b.id == id).count();
                 format!("{placed} posée(s) · clic droit : BOUM")
-            } else if id == WeaponId::MegaBomb {
-                "Minuterie de 8 s : cours !".to_string()
+            } else if spec.trigger > 0.0 {
+                "Mine : se déclenche à l'approche".to_string()
+            } else if spec.kind == Kind::Placed && spec.fuse > 0.0 {
+                format!("Minuterie de {:.0} s : cours !", spec.fuse)
             } else {
                 "Clic gauche : lancer".to_string()
             };
@@ -573,7 +580,10 @@ pub fn update(
     }
 
     // --- Barre d'armes : armes possédées, numérotées dans l'ordre ---
-    let owned = game.owned();
+    let all_owned = game.owned();
+    let current_cat = game.weapon.cat();
+    // Seules les armes de la catégorie en cours s'affichent.
+    let owned: Vec<WeaponId> = all_owned.iter().copied().filter(|w| w.cat() == current_cat).collect();
     for (slot_id, mut node, mut border, mut background) in &mut nodes.p0() {
         let index = owned.iter().position(|&w| w == slot_id.0);
         let display = if index.is_some() { Display::Flex } else { Display::None };
@@ -598,14 +608,29 @@ pub fn update(
             node.height = h;
         }
     }
+    for (chip, mut text, mut color, mut bg) in &mut chips {
+        let n = all_owned.iter().filter(|w| w.cat() == chip.0).count();
+        let active = chip.0 == current_cat;
+        let c = if active { ui::ACCENT } else if n == 0 { Color::srgba(1.0, 1.0, 1.0, 0.25) } else { ui::TEXT };
+        let value = format!("{} {}", chip.0.index() + 1, chip.0.name());
+        if text.0 != value {
+            text.0 = value;
+        }
+        if color.0 != c {
+            color.0 = c;
+        }
+        let b = if active { Color::srgba(0.18, 0.13, 0.03, 0.85) } else { Color::srgba(0.02, 0.025, 0.04, 0.6) };
+        if bg.0 != b {
+            bg.0 = b;
+        }
+    }
     for (part, mut t) in &mut slot_texts {
         let value = match *part {
             HotbarText::Key(id) => match owned.iter().position(|&w| w == id) {
-                Some(index @ 0..=8) => format!("{}", index + 1),
-                Some(9) => "0".to_string(),
+                Some(index) => format!("{}", index + 1),
                 _ => String::new(),
             },
-            HotbarText::Name(id) => short(id).to_string(),
+            HotbarText::Name(id) => id.spec().short.to_string(),
             HotbarText::Count(id) => {
                 let s = game.slot(id);
                 match id.kind() {

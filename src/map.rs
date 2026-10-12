@@ -894,6 +894,7 @@ fn container(w: &mut VoxelWorld, rng: &mut MapRng, at: IVec3) {
 /// Voiture : caisse, habitacle vitré, roues.
 fn car(w: &mut VoxelWorld, rng: &mut MapRng, at: IVec3) {
     let color = rng.pick(&[ROOF, METAL, PAINT, PLASTER, CONCRETE_DARK]);
+    w.cars.push(at);
     // Roues.
     for (x, z) in [(0, 1), (4, 1), (0, 8), (4, 8)] {
         w.fill(at + IVec3::new(x, 0, z), at + IVec3::new(x + 1, 2, z + 2), CONCRETE_DARK);

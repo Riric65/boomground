@@ -12,10 +12,14 @@ use crate::ui::{self, UiFont};
 #[derive(Resource, Default)]
 pub struct ShopState {
     pub open: bool,
+    /// Catégorie affichée (indice dans `Cat::ALL`).
+    pub cat: usize,
 }
 
 #[derive(Component)]
 pub struct ShopRoot;
+#[derive(Component)]
+pub struct ShopTab(usize);
 #[derive(Component)]
 pub struct ShopBuy(WeaponId);
 #[derive(Component)]
@@ -49,7 +53,7 @@ fn stats(id: WeaponId) -> String {
     let s = id.spec();
     match s.kind {
         Kind::Melee => format!("Rayon {:.1} m · {:.2} s par coup", s.radius, s.cooldown),
-        Kind::Gun if id == WeaponId::Rocket => format!("Explosion {:.1} m · portée {:.0} m", s.radius, s.reach),
+        Kind::Gun if s.projectile => format!("Explosion {:.1} m · portée {:.0} m", s.radius, s.reach),
         Kind::Gun => {
             let mut t = format!("Chargeur {} · portée {:.0} m", s.mag, s.reach);
             if s.pellets > 1 {
@@ -127,6 +131,18 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                         .with_child((ShopLabel::Money, ui::text(&font, "", 26.0, ui::GREEN)));
                         row.spawn((ShopClose, ui::button(130.0, 40.0, ui::BUTTON)))
                             .with_child(ui::label(&font, "Fermer (B)", 16.0, ui::TEXT));
+                    });
+
+                panel
+                    .spawn(Node {
+                        column_gap: px(8.0),
+                        ..default()
+                    })
+                    .with_children(|tabs| {
+                        for (i, cat) in crate::game::Cat::ALL.iter().enumerate() {
+                            tabs.spawn((ShopTab(i), ui::button(150.0, 38.0, ui::BUTTON)))
+                                .with_child(ui::label(&font, cat.name(), 16.0, ui::TEXT));
+                        }
                     });
 
                 panel
@@ -274,11 +290,18 @@ pub fn interact(
 /// Met à jour les libellés (prix, possédé, stock) et l'affichage.
 pub fn refresh(
     game: Res<GameState>,
-    shop: Res<ShopState>,
     mut root: Query<&mut Node, With<ShopRoot>>,
     mut labels: Query<(&ShopLabel, &mut Text, &mut TextColor)>,
-    mut cards: Query<(&ShopCard, &mut BorderColor)>,
+    mut cards: Query<(&ShopCard, &mut BorderColor, &mut Node), Without<ShopRoot>>,
+    tabs: Query<&ShopTab, Added<Pressed>>,
+    mut state: ResMut<ShopState>,
 ) {
+    for tab in &tabs {
+        if state.cat != tab.0 {
+            state.cat = tab.0;
+        }
+    }
+    let shop = state;
     if let Ok(mut node) = root.single_mut() {
         let d = if shop.open { Display::Flex } else { Display::None };
         if node.display != d {
@@ -288,7 +311,11 @@ pub fn refresh(
     if !shop.open {
         return;
     }
-    for (card, mut border) in &mut cards {
+    for (card, mut border, mut node) in &mut cards {
+        let show = if card.0.cat().index() == shop.cat { Display::Flex } else { Display::None };
+        if node.display != show {
+            node.display = show;
+        }
         let owned = game.slot(card.0).owned && !card.0.is_bomb();
         let c = if card.0 == game.weapon && owned {
             ui::ACCENT

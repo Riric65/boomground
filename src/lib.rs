@@ -25,6 +25,7 @@ pub mod servers;
 pub mod shop;
 pub mod sim;
 pub mod ui;
+pub mod vehicle;
 pub mod vitals;
 pub mod voice;
 pub mod vmesh;
@@ -54,6 +55,7 @@ pub fn run() {
         .init_resource::<chat::Chat>()
         .init_resource::<servers::ServerList>()
         .init_resource::<voice::VoiceInbox>()
+        .init_resource::<voice::Voice>()
         .init_resource::<net::client::WorldLoading>()
         .init_resource::<vmesh::ChunkEntities>()
         .init_resource::<GameState>()
@@ -103,6 +105,7 @@ pub fn run() {
                 shop::setup,
                 ui::setup_toasts,
                 chat::setup,
+                voice::setup_indicator,
                 menu::initial_phase,
                 debug::setup,
             )
@@ -149,6 +152,7 @@ pub fn run() {
                 vitals::update_ragdolls,
                 vitals::feedback,
                 vitals::death_camera,
+                vehicle::camera,
                 fx::apply_shake,
                 weapon::select,
                 weapon::act,
@@ -188,6 +192,10 @@ pub fn run() {
                 hud::loading_screen,
                 hud::damage_overlay,
                 rpc::update,
+                vehicle::controls,
+                vehicle::engine_sound,
+                voice::update,
+                voice::indicator,
                 menu::world_list,
                 menu::solo_pause,
                 menu::server_list_ui,

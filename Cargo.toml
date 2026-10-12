@@ -1,6 +1,6 @@
 [package]
 name = "boomground"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 description = "Destruction de voxels en bac à sable ou en mode boutique."
 license-file = "LICENSE"
@@ -15,6 +15,9 @@ path = "src/main.rs"
 # évite d'embarquer des fichiers audio.
 bevy = { version = "0.20", features = ["wav", "vorbis"] }
 # Heure locale de la machine pour le journal du serveur.
+# Voix de proximité : capture / lecture audio et suppression de bruit.
+cpal = "0.17"
+nnnoiseless = { version = "0.5", default-features = false }
 # Discord Rich Presence (IPC local, aucun compte requis).
 discord-rich-presence = "0.2"
 # Icône de la fenêtre.

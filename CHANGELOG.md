@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.5.0
+
+- **Armes** : 76 outils (4× plus) rangés en 6 catégories (touches 1–6), boutique par
+  catégorie. Nouveautés : lance-flammes, extincteur, mines, claymore, napalm, molotov,
+  canon, Tsar, lasers, armes blanches…
+- **Véhicules** : les voitures garées se conduisent (corps rigide, adhérence, direction) ;
+  elles ne roulent plus quand elles sont trop abîmées.
+- **Chat** modéré (débit, anti-répétition, mots interdits, mute) et **voix de proximité**
+  (RNNoise, réglage automatique du gain, limiteur).
+- **Liste de serveurs** enregistrés avec joueurs, mode, message du jour et ping.
+- **Discord Rich Presence** (solo / multijoueur), **icône** du jeu partout (fenêtre,
+  exécutable Windows, .desktop, AppImage).
+- **Chargement complet** (ville générée en arrière-plan, maillage avant de jouer), maillage
+  en tranches de temps.
+- **Physique** : les gros morceaux de bâtiment continuent de se briser et de tomber (plus de
+  « gel »), les petits finissent en tas de gravats.
+- **Vol** : désactivé par défaut en multijoueur (`allow_fly`), collisions et limites de
+  carte respectées, plus de faux positifs de l'anti-triche.
+- **Pause** : en ligne, le monde (et ton personnage) continuent pendant le menu.
+- **Portes** cassées ne s'ouvrent plus. Rouge à l'écran, battements de cœur, acouphène.
+- Sons plus puissants à longue portée, musique plus discrète, collage / copie dans les champs.
+- Interface à l'échelle de la fenêtre. Console du serveur sans coupure de saisie.
+- Taille de ville réglable (`map_size`, choix en solo) : moins de mémoire.
+- Protocole réseau v5.
 ## 1.4.0
 
 - **Physique structurelle** : stabilité par chemin de support (portée selon le matériau),

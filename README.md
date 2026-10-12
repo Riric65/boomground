@@ -52,8 +52,15 @@ Détails : [Installation](#installation).
   onglet Jouer → *Mondes sauvegardés*. Les serveurs sauvegardent aussi automatiquement.
 - **Une seule logique de jeu** : le solo lance un serveur privé local. Tout ce qui existe
   en solo (physique, dégâts, argent, portes, blocs, sauvegardes) existe donc en ligne.
-- **19 outils** : marteaux, pioche, marteau-piqueur, armes à feu, bombes, blocs.
-- **Multijoueur** : lobbys sur le réseau local, par code via Internet (UPnP), serveur dédié.
+- **76 outils** rangés en 6 catégories (touches `1`–`6`) : mêlée, pistolets, fusils, armes
+  lourdes, explosifs, outils. Lance-flammes, extincteur, mines, napalm, canon, Tsar…
+- **Véhicules** : monte dans une voiture garée avec `F` et conduis-la (`ZQSD`, `Espace`
+  frein, `H` klaxon). Le moteur est un vrai corps rigide : une voiture trop abîmée ne roule plus.
+- **Multijoueur** : liste de serveurs enregistrés (comme Minecraft), lobbys sur le réseau
+  local, code via Internet (UPnP), serveur dédié, **chat** (`T`) modéré et **voix de proximité**
+  (suppression de bruit, limiteur).
+- **Discord Rich Presence** : solo (mode, voxels détruits) ou serveur (nom, joueurs).
+- **Chargement complet** : la ville est générée et maillée avant de jouer.
 
 ## Commandes
 
@@ -65,8 +72,12 @@ Détails : [Installation](#installation).
 | Souris | regarder (clic = capturer le curseur) |
 | Clic gauche | agir avec l'outil en main |
 | Clic droit | faire sauter les C4 · changer de matériau (outil *Blocs*) |
-| `F` | ouvrir / fermer une porte |
-| 1…9, 0, molette, Q / E | changer d'outil |
+| `F` | ouvrir / fermer une porte · monter / descendre d'une voiture |
+| `T` / Entrée | écrire dans le chat (en ligne) |
+| `G` (maintenu) | parler, si la voix est réglée sur « touche » |
+| `H` | klaxon (en voiture) |
+| 1…6 | catégorie d'armes (encore : arme suivante de la catégorie) |
+| molette, Q / E | arme précédente / suivante |
 | R | recharger |
 | B | boutique (mode normal) |
 | Tab (maintenu) | liste des joueurs et code de la partie (en ligne) |
@@ -102,6 +113,8 @@ Les explosions s'enchaînent : une bombe prise dans un souffle explose à son to
 - La carte se charge progressivement autour de toi au démarrage (quelques secondes).
 
 ## Réglages
+
+Copier / coller (`Ctrl+C`, `Ctrl+V`) fonctionne dans tous les champs.
 
 Menu → Paramètres : sensibilité, champ de vision, secousses de caméra, inversion de l'axe Y,
 balancement à la marche, volumes (général, bruitages, musique), **préréglage graphique**

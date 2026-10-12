@@ -348,6 +348,11 @@ impl SfxBank {
     fn get(&self, kind: SfxKind) -> Option<Handle<AudioSource>> {
         self.0.get(&kind).cloned()
     }
+
+    /// Échantillon d'un effet (pour les boucles).
+    pub fn handle(&self, kind: SfxKind) -> Option<Handle<AudioSource>> {
+        self.get(kind)
+    }
 }
 
 pub fn setup_sounds(mut commands: Commands, mut assets: ResMut<Assets<AudioSource>>) {

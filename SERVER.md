@@ -44,6 +44,14 @@ Créé à côté de l'exécutable au premier lancement, **commenté clé par cl�
 | `starting_money` | `0` | argent de départ (mode normal) |
 | `explosion_scale` | `1.0` | multiplicateur du rayon maximal des explosions |
 | `anticheat` | `1` | `0` aucun, `1` normal, `2` strict |
+| `motd` | `Bienvenue…` | message affiché dans la liste des serveurs |
+| `map_size` | `33` | côté de la ville en pâtés de maisons (5–66) ; plus petit = moins de mémoire |
+| `allow_fly` | `false` | autorise le vol libre (touche V) en mode bac à sable |
+| `chat` | `true` | chat textuel |
+| `voice` | `true` | voix de proximité |
+| `voice_range` | `35` | portée de la voix, en mètres |
+| `chat_filter` | *(vide)* | mots interdits (remplacés par `***`) |
+| `chat_burst` | `5` | messages max par tranche de 8 s et par joueur |
 
 Armes : `hammer, sledge, warhammer, pickaxe, jackhammer, glock, revolver, smg, shotgun,
 rifle, minigun, sniper, railgun, rocket, grenade, dynamite, c4, megabomb, blocks`.
@@ -69,7 +77,15 @@ priment sur le fichier.
 ## Commandes de la console
 
 `help`, `list`, `say <texte>`, `kick <joueur>`, `ban <joueur>`, `pardon <joueur>`,
-`save [nom]`, `reset [seed]`, `seed`, `stop`.
+`mute <joueur>`, `unmute <joueur>`, `save [nom]`, `reset [seed]`, `seed`, `stop`.
+
+La ligne de saisie reste en bas de la console : les messages du journal ne la coupent plus.
+
+## Modération du chat
+
+Le serveur limite le débit (`chat_burst`), refuse de répéter le même message en moins de
+4 s, remplace les mots de `chat_filter`, et `mute` réduit un joueur au silence (chat et voix).
+Les morts et expulsions s'affichent dans le chat.
 
 ## Anti-triche
 

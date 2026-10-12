@@ -19,7 +19,7 @@ use bevy::window::{CursorGrabMode, CursorOptions};
 
 use crate::debris::Rng;
 use crate::fx::{self, FireAssets, SfxBank, SfxKind, Shake};
-use crate::game::{GameState, Kind, WeaponId};
+use crate::game::{GameState, Kind, Look, WeaponId, ALL_WEAPONS};
 use crate::net::client::NetClient;
 use crate::net::protocol::HitKind;
 use crate::player::{Body, Head, Player, WorldCamera};
@@ -173,6 +173,8 @@ pub struct Bomb {
     pub fuse: Option<f32>,
     pub stuck: bool,
     pub beep: f32,
+    /// Temps écoulé depuis la pose (armement des mines).
+    pub age: f32,
     /// Posée par ce joueur (sinon : simple image d'une bombe distante).
     pub local: bool,
 }
@@ -185,25 +187,16 @@ pub struct Tracer {
     pub t: f32,
 }
 
-/// Maillages et matériaux des bombes posées dans le monde.
+/// Maillages et matériaux des bombes et projectiles dans le monde.
 #[derive(Resource)]
 pub struct BombAssets {
-    pub grenade: (Handle<Mesh>, Handle<StandardMaterial>),
-    pub dynamite: (Handle<Mesh>, Handle<StandardMaterial>),
-    pub c4: (Handle<Mesh>, Handle<StandardMaterial>),
-    pub mega: (Handle<Mesh>, Handle<StandardMaterial>),
-    pub rocket: (Handle<Mesh>, Handle<StandardMaterial>),
+    items: std::collections::HashMap<u8, (Handle<Mesh>, Handle<StandardMaterial>)>,
+    fallback: (Handle<Mesh>, Handle<StandardMaterial>),
 }
 
 impl BombAssets {
-    fn get(&self, id: WeaponId) -> &(Handle<Mesh>, Handle<StandardMaterial>) {
-        match id {
-            WeaponId::Grenade => &self.grenade,
-            WeaponId::Dynamite => &self.dynamite,
-            WeaponId::MegaBomb => &self.mega,
-            WeaponId::Rocket => &self.rocket,
-            _ => &self.c4,
-        }
+    pub fn get(&self, id: WeaponId) -> &(Handle<Mesh>, Handle<StandardMaterial>) {
+        self.items.get(&id.0).unwrap_or(&self.fallback)
     }
 }
 
@@ -228,7 +221,8 @@ fn mat(materials: &mut Assets<StandardMaterial>, rgb: (f32, f32, f32), metal: f3
 }
 
 /// Construit les modèles en main de toutes les armes et les maillages des
-/// bombes.
+/// bombes. Les armes d'une même famille (`Look`) partagent la forme et
+/// diffèrent par la teinte et l'échelle.
 pub fn setup_viewmodels(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -244,10 +238,6 @@ pub fn setup_viewmodels(
     let dark = mat(&mut materials, (0.12, 0.12, 0.13), 0.5, 0.45);
     let poly = mat(&mut materials, (0.08, 0.08, 0.09), 0.0, 0.7);
     let rubber = mat(&mut materials, (0.10, 0.10, 0.12), 0.0, 0.9);
-    let yellow = mat(&mut materials, (0.92, 0.70, 0.10), 0.1, 0.6);
-    let olive = mat(&mut materials, (0.30, 0.36, 0.20), 0.1, 0.7);
-    let red = mat(&mut materials, (0.75, 0.10, 0.08), 0.0, 0.6);
-    let tan = mat(&mut materials, (0.80, 0.76, 0.40), 0.0, 0.8);
     let led = materials.add(StandardMaterial {
         base_color: Color::srgb(1.0, 0.1, 0.1),
         emissive: LinearRgba::rgb(6.0, 0.3, 0.3),
@@ -258,238 +248,319 @@ pub fn setup_viewmodels(
         emissive: LinearRgba::rgb(0.1, 0.3, 0.8),
         ..default()
     });
-
-    let cyl = |meshes: &mut Assets<Mesh>, r: f32, h: f32| meshes.add(Cylinder::new(r, h));
-    let cube = |meshes: &mut Assets<Mesh>, x: f32, y: f32, z: f32| meshes.add(Cuboid::new(x, y, z));
-    // Cylindre couché le long de -Z (axe du canon).
-    let along_z = Quat::from_rotation_x(FRAC_PI_2);
-
-    // Marteaux : manche vertical (main en bas), tête au sommet, penchés
-    // vers l'avant et vers le centre de l'écran.
-    let melee_base = |x: f32, y: f32, z: f32| {
-        Transform::from_xyz(x, y, z).with_rotation(Quat::from_rotation_z(0.32) * Quat::from_rotation_x(-0.45))
-    };
-
-    commands.entity(head).with_children(|p| {
-        // --- Marteau ---
-        let base = melee_base(0.30, -0.40, -0.52);
-        p.spawn((
-            ViewModel { id: WeaponId::Hammer, base, muzzle: Vec3::ZERO },
-            base,
-            Visibility::Hidden,
-        ))
-        .with_children(|p| {
-            let handle = cyl(&mut meshes, 0.016, 0.36);
-            let head_m = cube(&mut meshes, 0.05, 0.05, 0.15);
-            let claw = cube(&mut meshes, 0.04, 0.03, 0.08);
-            p.spawn(part(&handle, &wood, Transform::from_xyz(0.0, 0.16, 0.0)));
-            p.spawn(part(&cyl(&mut meshes, 0.02, 0.10), &rubber, Transform::from_xyz(0.0, 0.03, 0.0)));
-            p.spawn(part(&head_m, &steel, Transform::from_xyz(0.0, 0.34, -0.02)));
-            p.spawn(part(&claw, &steel, Transform::from_xyz(0.0, 0.35, 0.08).with_rotation(Quat::from_rotation_x(-0.5))));
-        });
-
-        // --- Masse ---
-        let base = melee_base(0.32, -0.46, -0.48);
-        p.spawn((ViewModel { id: WeaponId::Sledge, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
-            .with_children(|p| {
-                let handle = cyl(&mut meshes, 0.022, 0.62);
-                p.spawn(part(&handle, &wood, Transform::from_xyz(0.0, 0.28, 0.0)));
-                p.spawn(part(&cyl(&mut meshes, 0.027, 0.14), &rubber, Transform::from_xyz(0.0, 0.05, 0.0)));
-                p.spawn(part(&cube(&mut meshes, 0.11, 0.11, 0.26), &steel, Transform::from_xyz(0.0, 0.60, 0.0)));
-                p.spawn(part(&cube(&mut meshes, 0.12, 0.04, 0.12), &dark, Transform::from_xyz(0.0, 0.60, 0.0)));
-            });
-
-        // --- Masse de guerre ---
-        let base = melee_base(0.34, -0.50, -0.52);
-        p.spawn((ViewModel { id: WeaponId::WarHammer, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cyl(&mut meshes, 0.026, 0.74), &dark, Transform::from_xyz(0.0, 0.34, 0.0)));
-                p.spawn(part(&cyl(&mut meshes, 0.032, 0.18), &red, Transform::from_xyz(0.0, 0.06, 0.0)));
-                p.spawn(part(&cube(&mut meshes, 0.17, 0.17, 0.34), &steel, Transform::from_xyz(0.0, 0.74, 0.0)));
-                p.spawn(part(&cube(&mut meshes, 0.19, 0.06, 0.36), &dark, Transform::from_xyz(0.0, 0.74, 0.0)));
-                p.spawn(part(&cube(&mut meshes, 0.05, 0.14, 0.05), &steel, Transform::from_xyz(0.0, 0.88, 0.0)));
-            });
-
-        // --- Marteau-piqueur : tenu à deux mains, pointe vers l'avant ---
-        let base = Transform::from_xyz(0.22, -0.34, -0.55).with_rotation(Quat::from_rotation_y(0.08));
-        p.spawn((ViewModel { id: WeaponId::Jackhammer, base, muzzle: Vec3::new(0.22, -0.34, -1.0) }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cyl(&mut meshes, 0.065, 0.42), &yellow, Transform::from_xyz(0.0, 0.0, 0.0).with_rotation(along_z)));
-                p.spawn(part(&cyl(&mut meshes, 0.035, 0.12), &dark, Transform::from_xyz(0.0, 0.0, -0.26).with_rotation(along_z)));
-                p.spawn(part(&cyl(&mut meshes, 0.012, 0.22), &steel, Transform::from_xyz(0.0, 0.0, -0.42).with_rotation(along_z)));
-                p.spawn(part(&cube(&mut meshes, 0.34, 0.035, 0.035), &dark, Transform::from_xyz(0.0, 0.0, 0.24)));
-                p.spawn(part(&cube(&mut meshes, 0.05, 0.05, 0.08), &rubber, Transform::from_xyz(0.16, 0.0, 0.24)));
-                p.spawn(part(&cube(&mut meshes, 0.05, 0.05, 0.08), &rubber, Transform::from_xyz(-0.16, 0.0, 0.24)));
-            });
-
-        // --- Glock 17 ---
-        let base = Transform::from_xyz(0.17, -0.17, -0.38);
-        p.spawn((ViewModel { id: WeaponId::Glock, base, muzzle: Vec3::new(0.17, -0.14, -0.50) }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cube(&mut meshes, 0.036, 0.040, 0.17), &dark, Transform::from_xyz(0.0, 0.03, -0.03)));
-                p.spawn(part(&cube(&mut meshes, 0.034, 0.11, 0.05), &poly, Transform::from_xyz(0.0, -0.04, 0.03).with_rotation(Quat::from_rotation_x(-0.22))));
-                p.spawn(part(&cube(&mut meshes, 0.012, 0.02, 0.03), &poly, Transform::from_xyz(0.0, -0.005, 0.0)));
-            });
-
-        // --- Fusil à pompe ---
-        let base = Transform::from_xyz(0.19, -0.20, -0.42);
-        p.spawn((ViewModel { id: WeaponId::Shotgun, base, muzzle: Vec3::new(0.19, -0.17, -1.0) }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cyl(&mut meshes, 0.018, 0.62), &dark, Transform::from_xyz(0.0, 0.03, -0.34).with_rotation(along_z)));
-                p.spawn(part(&cyl(&mut meshes, 0.026, 0.20), &wood, Transform::from_xyz(0.0, -0.005, -0.30).with_rotation(along_z)));
-                p.spawn(part(&cube(&mut meshes, 0.05, 0.07, 0.20), &dark, Transform::from_xyz(0.0, 0.01, -0.02)));
-                p.spawn(part(&cube(&mut meshes, 0.045, 0.08, 0.26), &wood, Transform::from_xyz(0.0, -0.03, 0.20).with_rotation(Quat::from_rotation_x(0.12))));
-            });
-
-        // --- Fusil d'assaut ---
-        let base = Transform::from_xyz(0.18, -0.19, -0.40);
-        p.spawn((ViewModel { id: WeaponId::Rifle, base, muzzle: Vec3::new(0.18, -0.16, -0.95) }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cube(&mut meshes, 0.05, 0.075, 0.40), &dark, Transform::from_xyz(0.0, 0.0, -0.10)));
-                p.spawn(part(&cyl(&mut meshes, 0.012, 0.32), &dark, Transform::from_xyz(0.0, 0.02, -0.44).with_rotation(along_z)));
-                p.spawn(part(&cube(&mut meshes, 0.04, 0.14, 0.06), &olive, Transform::from_xyz(0.0, -0.09, -0.12).with_rotation(Quat::from_rotation_x(0.25))));
-                p.spawn(part(&cube(&mut meshes, 0.035, 0.09, 0.045), &poly, Transform::from_xyz(0.0, -0.07, 0.04).with_rotation(Quat::from_rotation_x(-0.25))));
-                p.spawn(part(&cube(&mut meshes, 0.04, 0.07, 0.22), &olive, Transform::from_xyz(0.0, -0.01, 0.20)));
-                p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.12), &poly, Transform::from_xyz(0.0, 0.05, -0.08)));
-            });
-
-        // --- Sniper .50 ---
-        let base = Transform::from_xyz(0.18, -0.20, -0.42);
-        p.spawn((ViewModel { id: WeaponId::Sniper, base, muzzle: Vec3::new(0.18, -0.18, -1.25) }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cube(&mut meshes, 0.05, 0.07, 0.42), &olive, Transform::from_xyz(0.0, 0.0, -0.05)));
-                p.spawn(part(&cyl(&mut meshes, 0.015, 0.62), &dark, Transform::from_xyz(0.0, 0.02, -0.56).with_rotation(along_z)));
-                p.spawn(part(&cube(&mut meshes, 0.05, 0.04, 0.06), &dark, Transform::from_xyz(0.0, 0.02, -0.88)));
-                p.spawn(part(&cyl(&mut meshes, 0.024, 0.24), &dark, Transform::from_xyz(0.0, 0.075, -0.06).with_rotation(along_z)));
-                p.spawn(part(&cyl(&mut meshes, 0.02, 0.005), &lens, Transform::from_xyz(0.0, 0.075, 0.062).with_rotation(along_z)));
-                p.spawn(part(&cube(&mut meshes, 0.04, 0.10, 0.20), &olive, Transform::from_xyz(0.0, -0.03, 0.24)));
-            });
-
-        // --- Lance-roquettes (sur l'épaule) ---
-        let base = Transform::from_xyz(0.24, -0.16, -0.30);
-        p.spawn((ViewModel { id: WeaponId::Rocket, base, muzzle: Vec3::new(0.24, -0.16, -1.0) }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cyl(&mut meshes, 0.065, 1.0), &olive, Transform::from_xyz(0.0, 0.0, -0.15).with_rotation(along_z)));
-                p.spawn(part(&cyl(&mut meshes, 0.075, 0.08), &dark, Transform::from_xyz(0.0, 0.0, -0.62).with_rotation(along_z)));
-                p.spawn(part(&cube(&mut meshes, 0.035, 0.12, 0.05), &poly, Transform::from_xyz(0.0, -0.10, -0.10)));
-                p.spawn(part(&cube(&mut meshes, 0.03, 0.05, 0.10), &dark, Transform::from_xyz(-0.07, 0.04, -0.20)));
-            });
-
-        // --- Grenade ---
-        let base = Transform::from_xyz(0.22, -0.24, -0.42);
-        p.spawn((ViewModel { id: WeaponId::Grenade, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&meshes.add(Sphere::new(0.045)), &olive, Transform::default()));
-                p.spawn(part(&cyl(&mut meshes, 0.015, 0.03), &steel, Transform::from_xyz(0.0, 0.05, 0.0)));
-                p.spawn(part(&cube(&mut meshes, 0.012, 0.07, 0.02), &steel, Transform::from_xyz(0.025, 0.03, 0.0).with_rotation(Quat::from_rotation_z(-0.3))));
-            });
-
-        // --- Dynamite ---
-        let base = Transform::from_xyz(0.22, -0.25, -0.42).with_rotation(Quat::from_rotation_z(0.4));
-        p.spawn((ViewModel { id: WeaponId::Dynamite, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
-            .with_children(|p| {
-                let stick = cyl(&mut meshes, 0.018, 0.18);
-                for x in [-0.019, 0.019] {
-                    p.spawn(part(&stick, &red, Transform::from_xyz(x, 0.0, 0.0)));
-                }
-                p.spawn(part(&stick, &red, Transform::from_xyz(0.0, 0.0, -0.03)));
-                p.spawn(part(&cyl(&mut meshes, 0.004, 0.06), &tan, Transform::from_xyz(0.0, 0.11, 0.0)));
-            });
-
-        // --- C4 ---
-        let base = Transform::from_xyz(0.22, -0.25, -0.42).with_rotation(Quat::from_rotation_x(0.5));
-        p.spawn((ViewModel { id: WeaponId::C4, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cube(&mut meshes, 0.15, 0.05, 0.10), &tan, Transform::default()));
-                p.spawn(part(&cube(&mut meshes, 0.05, 0.02, 0.03), &dark, Transform::from_xyz(0.03, 0.035, 0.0)));
-                p.spawn(part(&cube(&mut meshes, 0.015, 0.012, 0.015), &led, Transform::from_xyz(-0.04, 0.032, -0.02)));
-            });
-
-        // --- Pioche ---
-        let base = melee_base(0.32, -0.44, -0.50);
-        p.spawn((ViewModel { id: WeaponId::Pickaxe, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cyl(&mut meshes, 0.02, 0.56), &wood, Transform::from_xyz(0.0, 0.26, 0.0)));
-                p.spawn(part(&cube(&mut meshes, 0.03, 0.04, 0.34), &steel, Transform::from_xyz(0.0, 0.54, 0.0)));
-                p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.08), &steel, Transform::from_xyz(0.0, 0.54, -0.20).with_rotation(Quat::from_rotation_x(0.5))));
-                p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.08), &steel, Transform::from_xyz(0.0, 0.54, 0.20).with_rotation(Quat::from_rotation_x(-0.5))));
-            });
-
-        // --- Revolver .44 ---
-        let base = Transform::from_xyz(0.2, -0.2, -0.38);
-        p.spawn((ViewModel { id: WeaponId::Revolver, base, muzzle: Vec3::new(0.2, -0.16, -0.78) }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cyl(&mut meshes, 0.014, 0.30), &steel, Transform::from_xyz(0.0, 0.03, -0.20).with_rotation(along_z)));
-                p.spawn(part(&cyl(&mut meshes, 0.04, 0.09), &dark, Transform::from_xyz(0.0, 0.02, -0.03).with_rotation(along_z)));
-                p.spawn(part(&cube(&mut meshes, 0.035, 0.11, 0.06), &wood, Transform::from_xyz(0.0, -0.07, 0.05).with_rotation(Quat::from_rotation_x(-0.3))));
-                p.spawn(part(&cube(&mut meshes, 0.025, 0.04, 0.05), &steel, Transform::from_xyz(0.0, 0.06, 0.01)));
-            });
-
-        // --- Pistolet-mitrailleur ---
-        let base = Transform::from_xyz(0.19, -0.2, -0.38);
-        p.spawn((ViewModel { id: WeaponId::Smg, base, muzzle: Vec3::new(0.19, -0.17, -0.82) }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cube(&mut meshes, 0.05, 0.08, 0.30), &dark, Transform::from_xyz(0.0, 0.0, -0.08)));
-                p.spawn(part(&cyl(&mut meshes, 0.012, 0.18), &steel, Transform::from_xyz(0.0, 0.02, -0.32).with_rotation(along_z)));
-                p.spawn(part(&cube(&mut meshes, 0.035, 0.16, 0.05), &poly, Transform::from_xyz(0.0, -0.12, -0.08)));
-                p.spawn(part(&cube(&mut meshes, 0.035, 0.09, 0.045), &poly, Transform::from_xyz(0.0, -0.07, 0.07).with_rotation(Quat::from_rotation_x(-0.25))));
-                p.spawn(part(&cube(&mut meshes, 0.03, 0.025, 0.14), &steel, Transform::from_xyz(0.0, 0.05, 0.12)));
-            });
-
-        // --- Minigun ---
-        let base = Transform::from_xyz(0.22, -0.22, -0.40);
-        p.spawn((ViewModel { id: WeaponId::Minigun, base, muzzle: Vec3::new(0.22, -0.2, -1.0) }, base, Visibility::Hidden))
-            .with_children(|p| {
-                for (dx, dy) in [(-0.025, 0.0), (0.025, 0.0), (0.0, 0.03), (0.0, -0.03)] {
-                    p.spawn(part(&cyl(&mut meshes, 0.014, 0.62), &steel, Transform::from_xyz(dx, dy, -0.34).with_rotation(along_z)));
-                }
-                p.spawn(part(&cyl(&mut meshes, 0.06, 0.20), &dark, Transform::from_xyz(0.0, 0.0, -0.06).with_rotation(along_z)));
-                p.spawn(part(&cube(&mut meshes, 0.08, 0.14, 0.16), &olive, Transform::from_xyz(0.0, -0.06, 0.10)));
-                p.spawn(part(&cube(&mut meshes, 0.12, 0.10, 0.10), &poly, Transform::from_xyz(0.0, -0.14, 0.02)));
-            });
-
-        // --- Railgun ---
-        let base = Transform::from_xyz(0.19, -0.2, -0.42);
-        p.spawn((ViewModel { id: WeaponId::Railgun, base, muzzle: Vec3::new(0.19, -0.17, -1.1) }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cube(&mut meshes, 0.045, 0.07, 0.62), &steel, Transform::from_xyz(-0.025, 0.0, -0.30)));
-                p.spawn(part(&cube(&mut meshes, 0.045, 0.07, 0.62), &steel, Transform::from_xyz(0.025, 0.0, -0.30)));
-                p.spawn(part(&cube(&mut meshes, 0.012, 0.04, 0.60), &lens, Transform::from_xyz(0.0, 0.0, -0.30)));
-                p.spawn(part(&cube(&mut meshes, 0.09, 0.11, 0.22), &dark, Transform::from_xyz(0.0, -0.01, 0.10)));
-                p.spawn(part(&cube(&mut meshes, 0.04, 0.10, 0.05), &poly, Transform::from_xyz(0.0, -0.10, 0.12).with_rotation(Quat::from_rotation_x(-0.25))));
-            });
-
-        // --- Blocs (construction) ---
-        let base = Transform::from_xyz(0.26, -0.28, -0.48).with_rotation(Quat::from_rotation_y(0.4) * Quat::from_rotation_x(0.2));
-        p.spawn((ViewModel { id: WeaponId::Blocks, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&cube(&mut meshes, 0.14, 0.14, 0.14), &tan, Transform::default()));
-                p.spawn(part(&cube(&mut meshes, 0.15, 0.03, 0.15), &yellow, Transform::from_xyz(0.0, 0.0, 0.0)));
-            });
-
-        // --- Méga-bombe ---
-        let base = Transform::from_xyz(0.25, -0.34, -0.60);
-        p.spawn((ViewModel { id: WeaponId::MegaBomb, base, muzzle: Vec3::ZERO }, base, Visibility::Hidden))
-            .with_children(|p| {
-                p.spawn(part(&meshes.add(Sphere::new(0.14)), &dark, Transform::default()));
-                p.spawn(part(&cyl(&mut meshes, 0.04, 0.05), &steel, Transform::from_xyz(0.0, 0.15, 0.0)));
-                p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.01), &led, Transform::from_xyz(0.0, 0.03, -0.14)));
-            });
-    });
-
-    // Bombes posées / lancées dans le monde (couche 0, avec ombres).
     let led_world = materials.add(StandardMaterial {
         base_color: Color::srgb(0.9, 0.2, 0.15),
         emissive: LinearRgba::rgb(2.0, 0.2, 0.1),
         ..default()
     });
-    commands.insert_resource(BombAssets {
-        grenade: (meshes.add(Sphere::new(0.07)), olive.clone()),
-        dynamite: (meshes.add(Cylinder::new(0.04, 0.24)), red.clone()),
-        c4: (meshes.add(Cuboid::new(0.24, 0.07, 0.15)), tan.clone()),
-        mega: (meshes.add(Sphere::new(0.32)), led_world),
-        rocket: (meshes.add(Capsule3d::new(0.06, 0.36)), olive.clone()),
+
+    let cyl = |meshes: &mut Assets<Mesh>, r: f32, h: f32| meshes.add(Cylinder::new(r, h));
+    let cube = |meshes: &mut Assets<Mesh>, x: f32, y: f32, z: f32| meshes.add(Cuboid::new(x, y, z));
+    // Cylindre couché le long de -Z (axe du canon).
+    let along_z = Quat::from_rotation_x(FRAC_PI_2);
+    // Marteaux : manche vertical (main en bas), tête au sommet, penchés
+    // vers l'avant et vers le centre de l'écran.
+    let melee_pose = |x: f32, y: f32, z: f32| {
+        Transform::from_xyz(x, y, z).with_rotation(Quat::from_rotation_z(0.32) * Quat::from_rotation_x(-0.45))
+    };
+
+    let mut bombs = std::collections::HashMap::new();
+
+    commands.entity(head).with_children(|p| {
+        for &id in &ALL_WEAPONS {
+            let spec = id.spec();
+            let tint = mat(&mut materials, spec.tint, 0.4, 0.5);
+            let s = spec.scale;
+            // (pose de repos, bouche du canon dans l'espace caméra)
+            let (base, muzzle): (Transform, Vec3);
+            let mut entity = p.spawn((Visibility::Hidden, Transform::default()));
+            match spec.look {
+                Look::Hammer => {
+                    base = melee_pose(0.30 + 0.02 * (s - 1.0), -0.40 - 0.06 * (s - 1.0), -0.52);
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        let h = 0.36 + 0.28 * (s - 1.0);
+                        p.spawn(part(&cyl(&mut meshes, 0.016 + 0.008 * (s - 1.0), h), &wood, Transform::from_xyz(0.0, h * 0.45, 0.0)));
+                        p.spawn(part(&cyl(&mut meshes, 0.02, 0.10), &rubber, Transform::from_xyz(0.0, 0.03, 0.0)));
+                        let w = 0.05 + 0.06 * (s - 1.0);
+                        p.spawn(part(&cube(&mut meshes, w, w, 0.15 + 0.2 * (s - 1.0)), &tint, Transform::from_xyz(0.0, h * 0.95, -0.02)));
+                        p.spawn(part(&cube(&mut meshes, w * 1.1, 0.03, 0.12 + 0.2 * (s - 1.0)), &dark, Transform::from_xyz(0.0, h * 0.95, -0.02)));
+                    });
+                }
+                Look::Pick => {
+                    base = melee_pose(0.32, -0.44, -0.50);
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.02, 0.56), &wood, Transform::from_xyz(0.0, 0.26, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.03, 0.04, 0.34), &tint, Transform::from_xyz(0.0, 0.54, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.08), &tint, Transform::from_xyz(0.0, 0.54, -0.20).with_rotation(Quat::from_rotation_x(0.5))));
+                        p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.08), &tint, Transform::from_xyz(0.0, 0.54, 0.20).with_rotation(Quat::from_rotation_x(-0.5))));
+                    });
+                }
+                Look::Axe => {
+                    base = melee_pose(0.32, -0.42, -0.50);
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.02, 0.5), &wood, Transform::from_xyz(0.0, 0.23, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.025, 0.16, 0.12), &tint, Transform::from_xyz(0.0, 0.45, -0.06)));
+                        p.spawn(part(&cube(&mut meshes, 0.03, 0.06, 0.05), &dark, Transform::from_xyz(0.0, 0.45, 0.03)));
+                    });
+                }
+                Look::Blade => {
+                    base = melee_pose(0.30, -0.36, -0.50);
+                    muzzle = Vec3::ZERO;
+                    let len = 0.42 * s;
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.016, 0.16), &rubber, Transform::from_xyz(0.0, 0.07, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.07, 0.015, 0.02), &dark, Transform::from_xyz(0.0, 0.16, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.012, len, 0.045), &tint, Transform::from_xyz(0.0, 0.17 + len * 0.5, 0.0)));
+                    });
+                }
+                Look::Shovel => {
+                    base = melee_pose(0.32, -0.46, -0.50);
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.02, 0.62), &wood, Transform::from_xyz(0.0, 0.28, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.015, 0.2, 0.15), &tint, Transform::from_xyz(0.0, 0.66, -0.01)));
+                    });
+                }
+                Look::Chainsaw => {
+                    base = Transform::from_xyz(0.22, -0.26, -0.5);
+                    muzzle = Vec3::new(0.22, -0.24, -1.0);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cube(&mut meshes, 0.1, 0.12, 0.26), &tint, Transform::from_xyz(0.0, 0.0, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.025, 0.07, 0.42), &steel, Transform::from_xyz(0.0, 0.0, -0.33)));
+                        p.spawn(part(&cube(&mut meshes, 0.03, 0.1, 0.03), &dark, Transform::from_xyz(0.0, 0.1, 0.05)));
+                    });
+                }
+                Look::Drill => {
+                    base = Transform::from_xyz(0.22, -0.34 + 0.0 * s, -0.55).with_rotation(Quat::from_rotation_y(0.08));
+                    muzzle = Vec3::new(0.22, -0.34, -1.0);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.065, 0.42), &tint, Transform::from_xyz(0.0, 0.0, 0.0).with_rotation(along_z)));
+                        p.spawn(part(&cyl(&mut meshes, 0.035, 0.12), &dark, Transform::from_xyz(0.0, 0.0, -0.26).with_rotation(along_z)));
+                        p.spawn(part(&cyl(&mut meshes, 0.012, 0.22), &steel, Transform::from_xyz(0.0, 0.0, -0.42).with_rotation(along_z)));
+                        p.spawn(part(&cube(&mut meshes, 0.34, 0.035, 0.035), &dark, Transform::from_xyz(0.0, 0.0, 0.24)));
+                        p.spawn(part(&cube(&mut meshes, 0.05, 0.05, 0.08), &rubber, Transform::from_xyz(0.16, 0.0, 0.24)));
+                        p.spawn(part(&cube(&mut meshes, 0.05, 0.05, 0.08), &rubber, Transform::from_xyz(-0.16, 0.0, 0.24)));
+                    });
+                }
+                Look::Fist => {
+                    base = melee_pose(0.28, -0.32, -0.42);
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        p.spawn(part(&cube(&mut meshes, 0.1, 0.05, 0.05), &tint, Transform::from_xyz(0.0, 0.05, -0.02)));
+                        for k in 0..4 {
+                            p.spawn(part(&cube(&mut meshes, 0.018, 0.02, 0.02), &dark, Transform::from_xyz(-0.035 + 0.023 * k as f32, 0.08, -0.04)));
+                        }
+                    });
+                }
+                Look::Pistol => {
+                    base = Transform::from_xyz(0.17, -0.17, -0.38).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.17, -0.14, -0.38 - 0.13 * s);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cube(&mut meshes, 0.036, 0.040, 0.17), &tint, Transform::from_xyz(0.0, 0.03, -0.03)));
+                        p.spawn(part(&cube(&mut meshes, 0.034, 0.11, 0.05), &poly, Transform::from_xyz(0.0, -0.04, 0.03).with_rotation(Quat::from_rotation_x(-0.22))));
+                        p.spawn(part(&cube(&mut meshes, 0.012, 0.02, 0.03), &poly, Transform::from_xyz(0.0, -0.005, 0.0)));
+                    });
+                }
+                Look::Revolver => {
+                    base = Transform::from_xyz(0.2, -0.2, -0.38).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.2, -0.16, -0.38 - 0.4 * s);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.014, 0.30), &tint, Transform::from_xyz(0.0, 0.03, -0.20).with_rotation(along_z)));
+                        p.spawn(part(&cyl(&mut meshes, 0.04, 0.09), &dark, Transform::from_xyz(0.0, 0.02, -0.03).with_rotation(along_z)));
+                        p.spawn(part(&cube(&mut meshes, 0.035, 0.11, 0.06), &wood, Transform::from_xyz(0.0, -0.07, 0.05).with_rotation(Quat::from_rotation_x(-0.3))));
+                        p.spawn(part(&cube(&mut meshes, 0.025, 0.04, 0.05), &steel, Transform::from_xyz(0.0, 0.06, 0.01)));
+                    });
+                }
+                Look::Smg => {
+                    base = Transform::from_xyz(0.19, -0.2, -0.38).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.19, -0.17, -0.38 - 0.44 * s);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cube(&mut meshes, 0.05, 0.08, 0.30), &tint, Transform::from_xyz(0.0, 0.0, -0.08)));
+                        p.spawn(part(&cyl(&mut meshes, 0.012, 0.18), &steel, Transform::from_xyz(0.0, 0.02, -0.32).with_rotation(along_z)));
+                        p.spawn(part(&cube(&mut meshes, 0.035, 0.16, 0.05), &poly, Transform::from_xyz(0.0, -0.12, -0.08)));
+                        p.spawn(part(&cube(&mut meshes, 0.035, 0.09, 0.045), &poly, Transform::from_xyz(0.0, -0.07, 0.07).with_rotation(Quat::from_rotation_x(-0.25))));
+                        p.spawn(part(&cube(&mut meshes, 0.03, 0.025, 0.14), &steel, Transform::from_xyz(0.0, 0.05, 0.12)));
+                    });
+                }
+                Look::Rifle => {
+                    base = Transform::from_xyz(0.18, -0.19, -0.40).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.18, -0.16, -0.40 - 0.55 * s);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cube(&mut meshes, 0.05, 0.075, 0.40), &dark, Transform::from_xyz(0.0, 0.0, -0.10)));
+                        p.spawn(part(&cyl(&mut meshes, 0.012, 0.32), &dark, Transform::from_xyz(0.0, 0.02, -0.44).with_rotation(along_z)));
+                        p.spawn(part(&cube(&mut meshes, 0.04, 0.14, 0.06), &tint, Transform::from_xyz(0.0, -0.09, -0.12).with_rotation(Quat::from_rotation_x(0.25))));
+                        p.spawn(part(&cube(&mut meshes, 0.035, 0.09, 0.045), &poly, Transform::from_xyz(0.0, -0.07, 0.04).with_rotation(Quat::from_rotation_x(-0.25))));
+                        p.spawn(part(&cube(&mut meshes, 0.04, 0.07, 0.22), &tint, Transform::from_xyz(0.0, -0.01, 0.20)));
+                        p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.12), &poly, Transform::from_xyz(0.0, 0.05, -0.08)));
+                    });
+                }
+                Look::Shotgun => {
+                    base = Transform::from_xyz(0.19, -0.20, -0.42).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.19, -0.17, -0.42 - 0.58 * s);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.018, 0.62), &dark, Transform::from_xyz(0.0, 0.03, -0.34).with_rotation(along_z)));
+                        p.spawn(part(&cyl(&mut meshes, 0.026, 0.20), &tint, Transform::from_xyz(0.0, -0.005, -0.30).with_rotation(along_z)));
+                        p.spawn(part(&cube(&mut meshes, 0.05, 0.07, 0.20), &dark, Transform::from_xyz(0.0, 0.01, -0.02)));
+                        p.spawn(part(&cube(&mut meshes, 0.045, 0.08, 0.26), &wood, Transform::from_xyz(0.0, -0.03, 0.20).with_rotation(Quat::from_rotation_x(0.12))));
+                    });
+                }
+                Look::Sniper => {
+                    base = Transform::from_xyz(0.18, -0.20, -0.42).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.18, -0.18, -0.42 - 0.83 * s);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cube(&mut meshes, 0.05, 0.07, 0.42), &tint, Transform::from_xyz(0.0, 0.0, -0.05)));
+                        p.spawn(part(&cyl(&mut meshes, 0.015, 0.62), &dark, Transform::from_xyz(0.0, 0.02, -0.56).with_rotation(along_z)));
+                        p.spawn(part(&cube(&mut meshes, 0.05, 0.04, 0.06), &dark, Transform::from_xyz(0.0, 0.02, -0.88)));
+                        p.spawn(part(&cyl(&mut meshes, 0.024, 0.24), &dark, Transform::from_xyz(0.0, 0.075, -0.06).with_rotation(along_z)));
+                        p.spawn(part(&cyl(&mut meshes, 0.02, 0.005), &lens, Transform::from_xyz(0.0, 0.075, 0.062).with_rotation(along_z)));
+                        p.spawn(part(&cube(&mut meshes, 0.04, 0.10, 0.20), &tint, Transform::from_xyz(0.0, -0.03, 0.24)));
+                    });
+                }
+                Look::Launcher => {
+                    base = Transform::from_xyz(0.24, -0.16, -0.30).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.24, -0.16, -0.30 - 0.7 * s);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.065, 1.0), &tint, Transform::from_xyz(0.0, 0.0, -0.15).with_rotation(along_z)));
+                        p.spawn(part(&cyl(&mut meshes, 0.075, 0.08), &dark, Transform::from_xyz(0.0, 0.0, -0.62).with_rotation(along_z)));
+                        p.spawn(part(&cube(&mut meshes, 0.035, 0.12, 0.05), &poly, Transform::from_xyz(0.0, -0.10, -0.10)));
+                        p.spawn(part(&cube(&mut meshes, 0.03, 0.05, 0.10), &dark, Transform::from_xyz(-0.07, 0.04, -0.20)));
+                    });
+                }
+                Look::Minigun => {
+                    base = Transform::from_xyz(0.22, -0.22, -0.40).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.22, -0.2, -0.40 - 0.6 * s);
+                    entity.with_children(|p| {
+                        for (dx, dy) in [(-0.025, 0.0), (0.025, 0.0), (0.0, 0.03), (0.0, -0.03)] {
+                            p.spawn(part(&cyl(&mut meshes, 0.014, 0.62), &steel, Transform::from_xyz(dx, dy, -0.34).with_rotation(along_z)));
+                        }
+                        p.spawn(part(&cyl(&mut meshes, 0.06, 0.20), &dark, Transform::from_xyz(0.0, 0.0, -0.06).with_rotation(along_z)));
+                        p.spawn(part(&cube(&mut meshes, 0.08, 0.14, 0.16), &tint, Transform::from_xyz(0.0, -0.06, 0.10)));
+                        p.spawn(part(&cube(&mut meshes, 0.12, 0.10, 0.10), &poly, Transform::from_xyz(0.0, -0.14, 0.02)));
+                    });
+                }
+                Look::Rail => {
+                    base = Transform::from_xyz(0.19, -0.2, -0.42).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.19, -0.17, -0.42 - 0.68 * s);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cube(&mut meshes, 0.045, 0.07, 0.62), &steel, Transform::from_xyz(-0.025, 0.0, -0.30)));
+                        p.spawn(part(&cube(&mut meshes, 0.045, 0.07, 0.62), &steel, Transform::from_xyz(0.025, 0.0, -0.30)));
+                        p.spawn(part(&cube(&mut meshes, 0.012, 0.04, 0.60), &tint, Transform::from_xyz(0.0, 0.0, -0.30)));
+                        p.spawn(part(&cube(&mut meshes, 0.09, 0.11, 0.22), &dark, Transform::from_xyz(0.0, -0.01, 0.10)));
+                        p.spawn(part(&cube(&mut meshes, 0.04, 0.10, 0.05), &poly, Transform::from_xyz(0.0, -0.10, 0.12).with_rotation(Quat::from_rotation_x(-0.25))));
+                    });
+                }
+                Look::Crossbow => {
+                    base = Transform::from_xyz(0.19, -0.2, -0.42).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.19, -0.17, -0.42 - 0.5 * s);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cube(&mut meshes, 0.04, 0.05, 0.5), &wood, Transform::from_xyz(0.0, 0.0, -0.15)));
+                        p.spawn(part(&cube(&mut meshes, 0.5, 0.02, 0.03), &tint, Transform::from_xyz(0.0, 0.01, -0.40)));
+                        p.spawn(part(&cube(&mut meshes, 0.01, 0.01, 0.46), &steel, Transform::from_xyz(0.0, 0.04, -0.17)));
+                    });
+                }
+                Look::Flamer => {
+                    base = Transform::from_xyz(0.2, -0.22, -0.4).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.2, -0.2, -0.4 - 0.55 * s);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.05, 0.3), &tint, Transform::from_xyz(0.0, 0.0, 0.1).with_rotation(along_z)));
+                        p.spawn(part(&cyl(&mut meshes, 0.02, 0.5), &dark, Transform::from_xyz(0.0, 0.02, -0.28).with_rotation(along_z)));
+                        p.spawn(part(&cyl(&mut meshes, 0.012, 0.04), &led, Transform::from_xyz(0.0, 0.02, -0.54).with_rotation(along_z)));
+                    });
+                }
+                Look::Extinguisher => {
+                    base = Transform::from_xyz(0.22, -0.24, -0.42).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::new(0.22, -0.2, -0.75);
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.05, 0.28), &tint, Transform::default()));
+                        p.spawn(part(&cyl(&mut meshes, 0.02, 0.05), &dark, Transform::from_xyz(0.0, 0.16, 0.0)));
+                        p.spawn(part(&cyl(&mut meshes, 0.012, 0.22), &dark, Transform::from_xyz(0.0, 0.1, -0.12).with_rotation(along_z)));
+                    });
+                }
+                Look::Ball => {
+                    base = Transform::from_xyz(0.22, -0.24, -0.42).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        p.spawn(part(&meshes.add(Sphere::new(0.045)), &tint, Transform::default()));
+                        p.spawn(part(&cyl(&mut meshes, 0.015, 0.03), &steel, Transform::from_xyz(0.0, 0.05, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.012, 0.07, 0.02), &steel, Transform::from_xyz(0.025, 0.03, 0.0).with_rotation(Quat::from_rotation_z(-0.3))));
+                    });
+                }
+                Look::Bottle => {
+                    base = Transform::from_xyz(0.22, -0.24, -0.42).with_rotation(Quat::from_rotation_z(0.3)).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        p.spawn(part(&cyl(&mut meshes, 0.035, 0.14), &tint, Transform::default()));
+                        p.spawn(part(&cyl(&mut meshes, 0.015, 0.08), &tint, Transform::from_xyz(0.0, 0.11, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.03), &led, Transform::from_xyz(0.0, 0.17, 0.0)));
+                    });
+                }
+                Look::Stick => {
+                    base = Transform::from_xyz(0.22, -0.25, -0.42).with_rotation(Quat::from_rotation_z(0.4)).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        let stick = cyl(&mut meshes, 0.018, 0.18);
+                        for x in [-0.019, 0.019] {
+                            p.spawn(part(&stick, &tint, Transform::from_xyz(x, 0.0, 0.0)));
+                        }
+                        p.spawn(part(&stick, &tint, Transform::from_xyz(0.0, 0.0, -0.03)));
+                        p.spawn(part(&cyl(&mut meshes, 0.004, 0.06), &wood, Transform::from_xyz(0.0, 0.11, 0.0)));
+                    });
+                }
+                Look::Brick => {
+                    base = Transform::from_xyz(0.22, -0.25, -0.42).with_rotation(Quat::from_rotation_x(0.5)).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        p.spawn(part(&cube(&mut meshes, 0.15, 0.05, 0.10), &tint, Transform::default()));
+                        p.spawn(part(&cube(&mut meshes, 0.05, 0.02, 0.03), &dark, Transform::from_xyz(0.03, 0.035, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.015, 0.012, 0.015), &led, Transform::from_xyz(-0.04, 0.032, -0.02)));
+                    });
+                }
+                Look::Mega => {
+                    base = Transform::from_xyz(0.25, -0.34, -0.60).with_scale(Vec3::splat(s));
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        p.spawn(part(&meshes.add(Sphere::new(0.14)), &tint, Transform::default()));
+                        p.spawn(part(&cyl(&mut meshes, 0.04, 0.05), &steel, Transform::from_xyz(0.0, 0.15, 0.0)));
+                        p.spawn(part(&cube(&mut meshes, 0.03, 0.03, 0.01), &led, Transform::from_xyz(0.0, 0.03, -0.14)));
+                    });
+                }
+                Look::Blocks => {
+                    base = Transform::from_xyz(0.26, -0.28, -0.48).with_rotation(Quat::from_rotation_y(0.4) * Quat::from_rotation_x(0.2));
+                    muzzle = Vec3::ZERO;
+                    entity.with_children(|p| {
+                        p.spawn(part(&cube(&mut meshes, 0.14, 0.14, 0.14), &tint, Transform::default()));
+                        p.spawn(part(&cube(&mut meshes, 0.15, 0.03, 0.15), &steel, Transform::default()));
+                    });
+                }
+            }
+            entity.insert((ViewModel { id, base, muzzle }, base));
+
+            // Maillage en jeu (bombes, projectiles, grenades lancées).
+            let thrown = matches!(spec.kind, Kind::Thrown | Kind::Placed) || spec.projectile || (spec.kind == Kind::Gun && spec.fuse > 0.0);
+            if thrown {
+                let mesh = if spec.projectile && spec.kind == Kind::Gun {
+                    meshes.add(Capsule3d::new(0.06 * spec.scale.min(1.4), 0.36))
+                } else {
+                    match spec.look {
+                        Look::Ball => meshes.add(Sphere::new(0.07 * spec.scale)),
+                        Look::Stick => meshes.add(Cylinder::new(0.04 * spec.scale, 0.24 * spec.scale)),
+                        Look::Bottle => meshes.add(Capsule3d::new(0.045, 0.16)),
+                        Look::Mega => meshes.add(Sphere::new(0.32 * spec.scale)),
+                        Look::Brick => meshes.add(Cuboid::new(0.24 * spec.scale, 0.07 * spec.scale, 0.15 * spec.scale)),
+                        _ => meshes.add(Sphere::new(0.07)),
+                    }
+                };
+                let material = if spec.look == Look::Mega { led_world.clone() } else { mat(&mut materials, spec.tint, 0.1, 0.6) };
+                bombs.insert(id.0, (mesh, material));
+            }
+        }
     });
+
+    let fallback = (meshes.add(Sphere::new(0.07)), mat(&mut materials, (0.3, 0.36, 0.2), 0.1, 0.7));
+    commands.insert_resource(BombAssets { items: bombs, fallback });
 }
 
 /// Change d'arme : 1…9 puis 0 parmi les armes possédées, ou molette.
@@ -513,6 +584,9 @@ pub fn select(
     if owned.is_empty() {
         return;
     }
+    use crate::game::Cat;
+    let cat_of = |w: WeaponId| w.cat().index();
+    let in_cat = |c: usize| -> Vec<WeaponId> { owned.iter().copied().filter(|w| cat_of(*w) == c).collect() };
     let digits = [
         KeyCode::Digit1,
         KeyCode::Digit2,
@@ -520,21 +594,27 @@ pub fn select(
         KeyCode::Digit4,
         KeyCode::Digit5,
         KeyCode::Digit6,
-        KeyCode::Digit7,
-        KeyCode::Digit8,
-        KeyCode::Digit9,
-        KeyCode::Digit0,
     ];
     let mut wanted = game.weapon;
-    for (i, key) in digits.iter().enumerate() {
+    let current = cat_of(game.weapon);
+    // 1…6 : catégorie ; appuyer encore passe à l'arme suivante de la
+    // catégorie.
+    for (c, key) in digits.iter().enumerate() {
         if keys.just_pressed(*key) {
-            if let Some(&w) = owned.get(i) {
-                wanted = w;
+            let list = in_cat(c);
+            if list.is_empty() {
+                continue;
+            }
+            if c == current {
+                let i = list.iter().position(|&w| w == game.weapon).unwrap_or(0);
+                wanted = list[(i + 1) % list.len()];
+            } else {
+                let remembered = WeaponId(game.last_in_cat[c]);
+                wanted = if list.contains(&remembered) { remembered } else { list[0] };
             }
         }
     }
-    // Pavé numérique / touches au-delà de 10 armes : Q et E font défiler.
-    let index = owned.iter().position(|&w| w == game.weapon).unwrap_or(0);
+    // Molette, Q / E : dans la catégorie ; au bout, on passe à la suivante.
     let step = if wheel.delta.y < -0.5 || keys.just_pressed(KeyCode::KeyE) {
         1
     } else if wheel.delta.y > 0.5 || keys.just_pressed(KeyCode::KeyQ) {
@@ -543,14 +623,32 @@ pub fn select(
         0
     };
     if step != 0 {
-        let n = owned.len() as i32;
-        wanted = owned[((index as i32 + step).rem_euclid(n)) as usize];
+        let list = in_cat(current);
+        let i = list.iter().position(|&w| w == game.weapon).unwrap_or(0) as i32;
+        let n = list.len() as i32;
+        let next = i + step;
+        if next >= 0 && next < n {
+            wanted = list[next as usize];
+        } else {
+            // Catégorie voisine non vide.
+            let total = Cat::ALL.len() as i32;
+            let mut c = current as i32;
+            for _ in 0..total {
+                c = (c + step).rem_euclid(total);
+                let l = in_cat(c as usize);
+                if !l.is_empty() {
+                    wanted = if step > 0 { l[0] } else { l[l.len() - 1] };
+                    break;
+                }
+            }
+        }
     }
     if !owned.contains(&wanted) {
         wanted = owned[0];
     }
     if wanted != game.weapon {
         game.weapon = wanted;
+        game.last_in_cat[wanted.cat().index()] = wanted.0;
         *hands = Hands {
             equip: 1.0,
             cooldown: 0.2,
@@ -607,7 +705,15 @@ pub fn act(
 
     // Interagir (F) : portes.
     if keys.just_pressed(KeyCode::KeyF) && grabbed {
-        if let Some(door) = d.world.door_at(origin, dir, 3.6) {
+        // Voiture proche : on y monte (en ligne, le serveur décide).
+        let car = if d.world.door_at(origin, dir, 3.6).is_none() {
+            crate::vehicle::nearest_car(&d.world, origin, 5.5)
+        } else {
+            None
+        };
+        if let (Some(car), true) = (car, online) {
+            d.net.send_raw(crate::net::protocol::Packet::Enter { car: car as u16 });
+        } else if let Some(door) = d.world.door_at(origin, dir, 3.6) {
             if online {
                 d.net.send_raw(crate::net::protocol::Packet::Interact { door: door as u16 });
             } else if d.world.toggle_door(door).is_some() {
@@ -665,7 +771,7 @@ pub fn act(
                 });
             }
         }
-        Kind::Melee if id == WeaponId::Jackhammer => {
+        Kind::Melee if spec.auto => {
             hands.drill = pressed;
             if pressed && hands.cooldown <= 0.0 {
                 hands.cooldown = spec.cooldown;
@@ -754,39 +860,40 @@ pub fn act(
                 .unwrap_or(Vec3::new(0.2, -0.15, -0.8));
             let muzzle = cam.transform_point(muzzle_local);
             fx::flash(&mut d.commands, muzzle, 0.35);
-            let heavy = matches!(
-                id,
-                WeaponId::Sniper | WeaponId::Shotgun | WeaponId::Rocket | WeaponId::Revolver | WeaponId::Railgun
-            );
+            let heavy = spec.heavy;
             d.sound(if heavy { SfxKind::HeavyShot } else { SfxKind::Shot }, 0.8, origin);
             d.shake.add(if heavy { 0.3 } else { 0.1 });
 
-            if id == WeaponId::Rocket {
+            // Roquettes, missiles, lance-grenades : un projectile.
+            if spec.projectile || spec.fuse > 0.0 {
                 if online {
                     d.net.send_raw(crate::net::protocol::Packet::Throw { weapon: id.tag() });
                 }
                 let (mesh, material) = bomb_assets.get(id).clone();
-                d.commands.spawn((
+                let mut e = d.commands.spawn((
                     Bomb {
                         id,
-                        vel: dir * ROCKET_SPEED,
-                        fuse: Some(5.0),
+                        vel: dir * spec.speed.max(ROCKET_SPEED.min(spec.speed)),
+                        fuse: Some(if spec.projectile { 6.0 } else { spec.fuse }),
                         stuck: false,
                         beep: 0.0,
                         local: true,
+                        age: 0.0,
                     },
                     Mesh3d(mesh),
                     MeshMaterial3d(material),
                     Transform::from_translation(origin + dir * 0.9)
                         .with_rotation(Quat::from_rotation_arc(Vec3::Y, dir)),
-                    PointLight {
+                ));
+                if spec.projectile {
+                    e.insert(PointLight {
                         intensity: 40_000.0,
                         color: Color::srgb(1.0, 0.6, 0.2),
                         range: 8.0,
                         shadow_maps_enabled: false,
                         ..default()
-                    },
-                ));
+                    });
+                }
                 return;
             }
 
@@ -848,7 +955,7 @@ pub fn act(
                 d.net.send_raw(crate::net::protocol::Packet::Throw { weapon: id.tag() });
             }
             let (mesh, material) = bomb_assets.get(id).clone();
-            let speed = if id == WeaponId::Grenade { 17.0 } else { 14.0 };
+            let speed = spec.speed;
             d.commands.spawn((
                 Bomb {
                     id,
@@ -856,6 +963,7 @@ pub fn act(
                     fuse: Some(spec.fuse),
                     stuck: false,
                     beep: 0.0,
+                    age: 0.0,
                     local: true,
                 },
                 Mesh3d(mesh),
@@ -869,10 +977,10 @@ pub fn act(
                 hands.swing = if next >= 1.0 { None } else { Some(next) };
             }
             // Clic droit : la C4 saute (toutes celles qu'on a posées).
-            if id == WeaponId::C4 && grabbed && buttons.just_pressed(MouseButton::Right) {
+            if spec.remote && grabbed && buttons.just_pressed(MouseButton::Right) {
                 let mut k = 0;
                 for mut bomb in &mut bombs {
-                    if bomb.local && bomb.id == WeaponId::C4 && bomb.fuse.is_none() {
+                    if bomb.local && bomb.id.spec().remote && bomb.fuse.is_none() {
                         bomb.fuse = Some(0.05 + k as f32 * 0.12);
                         k += 1;
                     }
@@ -898,7 +1006,7 @@ pub fn act(
             let (at, rotation, stuck) = match d.world.raycast(origin, dir, spec.reach) {
                 Some(hit) if hit.normal != Vec3::ZERO => {
                     let r = Quat::from_rotation_arc(Vec3::Y, hit.normal);
-                    let lift = if id == WeaponId::MegaBomb { 0.3 } else { 0.04 };
+                    let lift = if spec.look == crate::game::Look::Mega { 0.3 * spec.scale } else { 0.04 };
                     (hit.point + hit.normal * lift, r, true)
                 }
                 _ => (origin + dir * 1.5, Quat::IDENTITY, false),
@@ -927,7 +1035,8 @@ pub fn spawn_placed(
         Bomb {
             id,
             vel: Vec3::ZERO,
-            fuse: if id == WeaponId::C4 { None } else { Some(id.spec().fuse) },
+            fuse: if id.spec().remote || id.spec().trigger > 0.0 { None } else { Some(id.spec().fuse) },
+            age: 0.0,
             stuck,
             beep: 0.0,
             local,
@@ -936,7 +1045,7 @@ pub fn spawn_placed(
         MeshMaterial3d(material),
         Transform::from_translation(at).with_rotation(rotation),
     ));
-    if id == WeaponId::MegaBomb {
+    if id.spec().look == crate::game::Look::Mega {
         e.insert(PointLight {
             intensity: 0.0,
             color: Color::srgb(1.0, 0.1, 0.05),
@@ -951,17 +1060,33 @@ pub fn spawn_placed(
 pub fn update_bombs(
     time: Res<Time>,
     mut bombs: Query<(Entity, &mut Bomb, &mut Transform, Option<&mut PointLight>)>,
+    me: Query<&Transform, (With<Player>, Without<Bomb>)>,
+    others: Query<&Transform, (With<crate::net::client::RemotePlayer>, Without<Bomb>, Without<Player>)>,
     mut d: Destroyer,
 ) {
     let dt = time.delta_secs().min(0.05);
     let mut booms: Vec<(Vec3, f32, bool)> = Vec::new();
 
     for (entity, mut bomb, mut transform, light) in &mut bombs {
-        let half = Vec3::splat(match bomb.id {
-            WeaponId::MegaBomb => 0.3,
-            WeaponId::Rocket => 0.08,
-            _ => 0.07,
+        bomb.age += dt;
+        let bspec = bomb.id.spec();
+        let half = Vec3::splat(if bspec.look == crate::game::Look::Mega {
+            0.3 * bspec.scale
+        } else if bspec.projectile {
+            0.08
+        } else {
+            0.07
         });
+        // Mine : se déclenche quand quelqu'un s'approche (après armement).
+        if bomb.local && bspec.trigger > 0.0 && bomb.fuse.is_none() && bomb.age > 1.5 {
+            let at = transform.translation;
+            let near_me = me.iter().any(|p| p.translation.distance(at) < bspec.trigger);
+            let near_other = others.iter().any(|p| p.translation.distance(at) < bspec.trigger);
+            if near_me || near_other {
+                bomb.fuse = Some(0.15);
+                d.sound(SfxKind::Beep, 0.9, at);
+            }
+        }
 
         // Le support a été détruit : la bombe tombe.
         if bomb.stuck {
@@ -972,7 +1097,7 @@ pub fn update_bombs(
         }
 
         if !bomb.stuck {
-            let gravity = if bomb.id == WeaponId::Rocket { 1.5 } else { 22.0 };
+            let gravity = if bspec.projectile { 1.5 } else { 22.0 };
             bomb.vel.y -= gravity * dt;
             let mut pos = transform.translation;
             for axis in [1, 0, 2] {
@@ -981,9 +1106,9 @@ pub fn update_bombs(
                     continue;
                 }
                 if d.world.sweep(&mut pos, half, axis, delta) {
-                    match bomb.id {
-                        WeaponId::Rocket => bomb.fuse = Some(0.0),
-                        WeaponId::Dynamite => {
+                    match () {
+                        _ if bspec.projectile || bspec.contact => bomb.fuse = Some(0.0),
+                        _ if bspec.sticky => {
                             bomb.vel = Vec3::ZERO;
                             bomb.stuck = true;
                         }
@@ -1001,7 +1126,7 @@ pub fn update_bombs(
                 }
             }
             transform.translation = pos;
-            if bomb.id == WeaponId::Rocket {
+            if bspec.projectile {
                 if let Some(dir) = bomb.vel.try_normalize() {
                     transform.rotation = Quat::from_rotation_arc(Vec3::Y, dir);
                 }
@@ -1021,17 +1146,17 @@ pub fn update_bombs(
         let remaining = *fuse;
 
         // Bips de plus en plus rapides (C4, méga-bombe).
-        if matches!(bomb.id, WeaponId::MegaBomb | WeaponId::Dynamite) && bomb.local {
+        if matches!(bspec.look, crate::game::Look::Mega | crate::game::Look::Stick) && bomb.local {
             bomb.beep -= dt;
             if bomb.beep <= 0.0 {
                 bomb.beep = (remaining / 8.0).clamp(0.08, 0.7);
-                if bomb.id == WeaponId::MegaBomb {
+                if bspec.look == crate::game::Look::Mega {
                     d.sound(SfxKind::Beep, 0.8, transform.translation);
                 }
             }
         }
         if let Some(mut light) = light {
-            if bomb.id == WeaponId::MegaBomb {
+            if bspec.look == crate::game::Look::Mega {
                 light.intensity = if bomb.beep > 0.05 { 0.0 } else { 60_000.0 };
             }
         }

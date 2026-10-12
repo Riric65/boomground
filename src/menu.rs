@@ -89,6 +89,8 @@ pub enum MenuAction {
 /// Réglage modifiable par −/+.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingKind {
+    VoiceMode,
+    VoiceVolume,
     Quality,
     Msaa,
     Particles,
@@ -700,6 +702,8 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                                 setting_row(c, &font, "Volume général", SettingKind::Volume);
                                 setting_row(c, &font, "Bruitages", SettingKind::Sfx);
                                 setting_row(c, &font, "Musique", SettingKind::Music);
+                                setting_row(c, &font, "Voix de proximité", SettingKind::VoiceMode);
+                                setting_row(c, &font, "Volume des voix", SettingKind::VoiceVolume);
                             });
                             cols.spawn((ui::card(), shadow())).insert(node).with_children(|c| {
                                 c.spawn(ui::text(&font, "AFFICHAGE", 13.0, ui::MUTED));
@@ -1346,6 +1350,10 @@ pub fn actions(
                         settings.particles = (settings.particles as i32 + dir as i32).rem_euclid(3) as u8
                     }
                     SettingKind::Music => settings.music += 0.1 * d,
+                    SettingKind::VoiceVolume => settings.voice_volume += 0.1 * d,
+                    SettingKind::VoiceMode => {
+                        settings.voice_mode = (settings.voice_mode as i32 + dir as i32).rem_euclid(3) as u8
+                    }
                     SettingKind::Sensitivity => settings.sensitivity *= if dir > 0 { 1.15 } else { 1.0 / 1.15 },
                     SettingKind::Volume => settings.volume += 0.1 * d,
                     SettingKind::Sfx => settings.sfx += 0.1 * d,
@@ -1861,6 +1869,8 @@ pub fn settings_panel(
             },
             SettingKind::Particles => ["aucune", "réduites", "pleines"][settings.particles.min(2) as usize].to_string(),
             SettingKind::Music => format!("{:.0} %", settings.music * 100.0),
+            SettingKind::VoiceVolume => format!("{:.0} %", settings.voice_volume * 100.0),
+            SettingKind::VoiceMode => ["désactivée", "activation vocale", "touche G"][settings.voice_mode.min(2) as usize].to_string(),
             SettingKind::Sfx => format!("{:.0} %", settings.sfx * 100.0),
             SettingKind::ViewDistance => format!("{:.0} m", settings.view_distance),
             SettingKind::Shadows => ["aucune", "moyenne", "haute"][settings.shadows.min(2) as usize].to_string(),

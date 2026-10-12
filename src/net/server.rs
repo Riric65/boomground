@@ -162,7 +162,7 @@ struct Client {
     last_swing_at: Instant,
     reload_until: Option<Instant>,
     /// Bombes armées (rayon maximal, date) en attente d'explosion.
-    pending: Vec<(f32, Instant)>,
+    pending: Vec<(f32, Instant, WeaponId)>,
     /// Anti-triche : points de suspicion, état de vol / chute.
     strikes: f32,
     last_valid: Vec3,
@@ -185,6 +185,10 @@ struct Client {
     voice_refill: Instant,
     /// Connexion de simple consultation : fermée après la réponse.
     close_after: bool,
+    /// Corps du véhicule conduit et dernières commandes.
+    driving: Option<u32>,
+    drive: (i8, i8, bool),
+    drive_at: Instant,
 }
 
 impl Client {
@@ -229,6 +233,8 @@ struct ServerState {
     banned: Vec<String>,
     /// Joueurs réduits au silence (pseudo en minuscules).
     muted: Vec<String>,
+    /// Voiture (index de la carte) → corps rigide activé.
+    car_bodies: HashMap<u16, u32>,
     rejections: u32,
     last_snapshot: f32,
     last_sim: Instant,
@@ -369,6 +375,9 @@ fn new_client(stream: TcpStream, addr: IpAddr, rules: &Rules, mode: u8) -> Clien
         voice_tokens: 100.0,
         voice_refill: now,
         close_after: false,
+        driving: None,
+        drive: (0, 0, false),
+        drive_at: now,
     }
 }
 
@@ -457,6 +466,7 @@ fn server_app(
         players,
         banned: read_banned(),
         muted: Vec::new(),
+        car_bodies: HashMap::new(),
         rejections: 0,
         last_snapshot: 0.0,
         last_sim: now,
@@ -891,6 +901,24 @@ fn ignite_around(server: &mut ServerState, center: Vec3, radius: f32) {
     }
 }
 
+/// Éteint les flammes autour d'un point (extincteur).
+fn douse_around(server: &mut ServerState, center: Vec3, radius: f32) {
+    let removed: Vec<IVec3> = server
+        .fire
+        .keys()
+        .copied()
+        .filter(|c| server.world.cell_center(*c).distance(center) <= radius)
+        .collect();
+    if removed.is_empty() {
+        return;
+    }
+    for c in &removed {
+        server.fire.remove(c);
+    }
+    let list: Vec<[u16; 3]> = removed.iter().map(|c| [c.x as u16, c.y as u16, c.z as u16]).collect();
+    broadcast(server, None, &Packet::Fire { add: Vec::new(), remove: list });
+}
+
 /// Avance le feu : propagation, voxels consumés, brûlures.
 fn fire_tick(server: &mut ServerState, dt: f32) {
     if server.fire.is_empty() {
@@ -1257,6 +1285,10 @@ fn reset_world(server: &mut ServerState, seed: u64) {
     server.history.clear();
     server.events.clear();
     server.fire.clear();
+    server.car_bodies.clear();
+    for c in server.clients.values_mut() {
+        c.driving = None;
+    }
     server.config.seed = seed;
     logger::info(format!("Nouvelle ville, seed {seed}"));
     broadcast(server, None, &Packet::Reset { seed });
@@ -1330,6 +1362,54 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
             started: server.started,
         };
         server.responder.poll(&info);
+    }
+
+    // Conducteurs : commandes, position, éjection si le véhicule est HS.
+    let drivers: Vec<u16> = server
+        .clients
+        .iter()
+        .filter(|(_, c)| c.driving.is_some())
+        .map(|(&id, _)| id)
+        .collect();
+    for id in drivers {
+        let (body_id, drive, fresh, dead) = {
+            let c = &server.clients[&id];
+            (
+                c.driving.unwrap(),
+                c.drive,
+                now.duration_since(c.drive_at) < Duration::from_millis(400),
+                c.dead_until.is_some(),
+            )
+        };
+        let state = server.sim.body_mut(body_id).map(|b| {
+            if let Some(v) = b.vehicle.as_mut() {
+                if fresh {
+                    v.throttle = drive.0 as f32;
+                    v.steer = drive.1 as f32;
+                    v.brake = drive.2;
+                    v.ttl = 0.3;
+                }
+                (b.pos, v.alive)
+            } else {
+                (b.pos, false)
+            }
+        });
+        match state {
+            Some((pos, alive)) if alive && !dead => {
+                if let Some(c) = server.clients.get_mut(&id) {
+                    c.pos = pos - Vec3::Y * 0.4;
+                    c.last_valid = c.pos;
+                    c.placed = true;
+                    c.airborne_since = None;
+                    c.fall_speed = 0.0;
+                }
+            }
+            Some((_, false)) if !dead => {
+                notice(&mut server, id, "Le véhicule est hors d'usage.");
+                eject_driver(&mut server, id, true);
+            }
+            _ => eject_driver(&mut server, id, !dead),
+        }
     }
 
     // Physique : gravats et corps rigides.
@@ -1772,7 +1852,7 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
             }
             client.inv_dirty = true;
             client.last_activity = Instant::now();
-            client.pending.push((w.spec().radius * rules.explosion_scale * 1.05, Instant::now()));
+            client.pending.push((w.spec().radius * rules.explosion_scale * 1.05, Instant::now(), w));
             broadcast(server, Some(id), &Packet::BombPlaced { at, weapon });
         }
         Packet::Throw { weapon } => {
@@ -1787,7 +1867,7 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
             }
             let ok = match w.kind() {
                 Kind::Thrown => client.inv.use_bomb(w),
-                Kind::Gun if w == WeaponId::Rocket => {
+                Kind::Gun if w.spec().projectile || w.spec().fuse > 0.0 => {
                     let slot = client.inv.slot_mut(w);
                     if slot.mag > 0 && client.reload_until.is_none() {
                         slot.mag -= 1;
@@ -1804,7 +1884,7 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
             }
             client.inv_dirty = true;
             client.last_activity = Instant::now();
-            client.pending.push((w.spec().radius * rules.explosion_scale * 1.05, Instant::now()));
+            client.pending.push((w.spec().radius * rules.explosion_scale * 1.05, Instant::now(), w));
         }
         Packet::Reload => {
             let Some(client) = server.clients.get_mut(&id) else { return };
@@ -1858,6 +1938,15 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
             }
         }
         Packet::Chat { text } => handle_chat(server, id, text),
+        Packet::Enter { car } => handle_enter(server, id, car),
+        Packet::Exit => eject_driver(server, id, true),
+        Packet::Drive { throttle, steer, brake } => {
+            if let Some(c) = server.clients.get_mut(&id) {
+                c.drive = (throttle.clamp(-1, 1), steer.clamp(-1, 1), brake);
+                c.drive_at = Instant::now();
+                c.last_activity = c.drive_at;
+            }
+        }
         Packet::Voice { seq, data, .. } => handle_voice(server, id, seq, data),
         Packet::Ping => {
             if let Some(c) = server.clients.get_mut(&id) {
@@ -1886,6 +1975,115 @@ fn filter_text(text: &str, words: &[String]) -> String {
         }
     }
     out
+}
+
+/// Monte dans une voiture : la première fois, ses voxels deviennent un
+/// corps rigide conduisible.
+fn handle_enter(server: &mut ServerState, id: u16, car: u16) {
+    if !server.started || server.paused {
+        return;
+    }
+    let Some(c) = server.clients.get(&id) else { return };
+    if !c.joined || !c.placed || c.dead_until.is_some() || c.driving.is_some() {
+        return;
+    }
+    let player = c.pos;
+    let Some(&min) = server.world.cars.get(car as usize) else { return };
+    let center = server.world.cell_center(min + IVec3::new(2, 3, 5));
+    if center.distance(player + Vec3::Y) > 7.0 {
+        suspect(server, id, 1.0, "véhicule hors de portée");
+        return;
+    }
+    let body_id = match server.car_bodies.get(&car).copied() {
+        Some(b) if server.sim.body(b).is_some() => b,
+        Some(_) => {
+            notice(server, id, "Ce véhicule est hors d'usage.");
+            return;
+        }
+        None => {
+            let mut cells = Vec::new();
+            for x in 0..5 {
+                for y in 0..6 {
+                    for z in 0..11 {
+                        let cell = min + IVec3::new(x, y, z);
+                        if server.world.is_solid(cell) {
+                            cells.push(cell);
+                        }
+                    }
+                }
+            }
+            if cells.len() < 60 {
+                notice(server, id, "Cette voiture est trop abîmée.");
+                return;
+            }
+            for &cell in &cells {
+                server.world.set(cell, false, 0);
+            }
+            broadcast_removed(server, &cells);
+            let made = {
+                let s = &mut *server;
+                s.sim.form_vehicle(&s.world, cells)
+            };
+            let Some(b) = made else {
+                notice(server, id, "Impossible de démarrer ce véhicule.");
+                return;
+            };
+            server.car_bodies.insert(car, b);
+            server.events.push(SimEvent::BodyChanged(b));
+            flush_events(server);
+            b
+        }
+    };
+    // Place prise ?
+    if server.clients.values().any(|c| c.driving == Some(body_id)) {
+        notice(server, id, "La place est prise.");
+        return;
+    }
+    let alive = server.sim.body(body_id).and_then(|b| b.vehicle.as_ref()).is_some_and(|v| v.alive);
+    if !alive {
+        notice(server, id, "Le véhicule est trop endommagé pour rouler.");
+        return;
+    }
+    if let Some(c) = server.clients.get_mut(&id) {
+        c.driving = Some(body_id);
+        c.drive = (0, 0, false);
+        c.drive_at = Instant::now();
+    }
+    send(server, id, &Packet::Driving { body: body_id });
+}
+
+/// Fait descendre un conducteur (à côté du véhicule si `place`).
+fn eject_driver(server: &mut ServerState, id: u16, place: bool) {
+    let Some(c) = server.clients.get_mut(&id) else { return };
+    let Some(body_id) = c.driving.take() else { return };
+    let mut target = None;
+    if place {
+        if let Some(b) = server.sim.body(body_id) {
+            let fwd = b.rot * Vec3::NEG_Z;
+            let side = Vec3::new(-fwd.z, 0.0, fwd.x).normalize_or_zero();
+            for s in [3.0, -3.0, 4.5] {
+                let p = b.pos + side * s;
+                let ground = server.world.ground_height(p.x, p.z);
+                let candidate = Vec3::new(p.x, ground + 0.1, p.z);
+                if !server.world.overlaps(candidate + Vec3::new(-0.3, 0.1, -0.3), candidate + Vec3::new(0.3, 1.7, 0.3)) {
+                    target = Some(candidate);
+                    break;
+                }
+            }
+            if target.is_none() {
+                target = Some(b.pos + Vec3::Y * 3.0);
+            }
+        }
+    }
+    if let Some(c) = server.clients.get_mut(&id) {
+        if let Some(p) = target {
+            c.pos = p;
+            c.last_valid = p;
+            c.teleporting = Some((p, Instant::now()));
+            c.queue(&Packet::Teleport { pos: p }.encode());
+        }
+        c.queue(&Packet::Driving { body: 0 }.encode());
+    }
 }
 
 /// Chat : nettoyage, limite de débit, anti-répétition, mots interdits.
@@ -2115,6 +2313,12 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
     if c.dead_until.is_some() || !c.joined {
         return;
     }
+    // Au volant : la position vient du véhicule.
+    if c.driving.is_some() {
+        c.yaw = yaw;
+        c.pitch = pitch;
+        return;
+    }
     // Téléportation en cours (chargement, correction) : on attend que le
     // client y soit arrivé.
     if let Some((target, since)) = c.teleporting {
@@ -2265,6 +2469,8 @@ fn handle_hit(server: &mut ServerState, id: u16, kind: HitKind, origin: Vec3, di
     }
     let player = client.pos + Vec3::Y * 1.6;
     let mut cap = blast_cap(kind, weapon, &rules);
+    // Arme dont vient l'explosion (bombe armée), pour l'incendie.
+    let mut exploded: Option<WeaponId> = None;
 
     let violation = match kind {
         HitKind::Sledge => {
@@ -2279,7 +2485,7 @@ fn handle_hit(server: &mut ServerState, id: u16, kind: HitKind, origin: Vec3, di
             }
         }
         HitKind::Bullet => {
-            if spec.kind != Kind::Gun || weapon == WeaponId::Rocket {
+            if spec.kind != Kind::Gun || spec.projectile || spec.fuse > 0.0 {
                 Some(("tir avec une arme sans munitions", 2.0))
             } else if client.reload_until.is_some() {
                 Some(("tir pendant le rechargement", 0.5))
@@ -2310,12 +2516,13 @@ fn handle_hit(server: &mut ServerState, id: u16, kind: HitKind, origin: Vec3, di
                 .pending
                 .iter()
                 .enumerate()
-                .filter(|(_, (c, _))| *c >= blast * 0.95)
+                .filter(|(_, (c, _, _))| *c >= blast * 0.95)
                 .min_by(|a, b| a.1 .0.total_cmp(&b.1 .0))
                 .map(|(i, _)| i);
             match idx {
                 Some(i) => {
                     cap = client.pending[i].0;
+                    exploded = Some(client.pending[i].2);
                     client.pending.remove(i);
                     None
                 }
@@ -2368,7 +2575,18 @@ fn handle_hit(server: &mut ServerState, id: u16, kind: HitKind, origin: Vec3, di
             }
         }
         match world_hit {
-            Some(hit) => hit.point,
+            Some(hit) => {
+                // Extincteur : éteint, ne détruit rien.
+                if spec.extinguish {
+                    douse_around(server, hit.point, 2.6);
+                    return;
+                }
+                // Balles incendiaires (fusée, lance-flammes, plasma).
+                if spec.incendiary > 0.0 {
+                    ignite_around(server, hit.point, spec.incendiary * 0.45);
+                }
+                hit.point
+            }
             None => return,
         }
     };
@@ -2420,7 +2638,8 @@ fn handle_hit(server: &mut ServerState, id: u16, kind: HitKind, origin: Vec3, di
     if kind == HitKind::Explosion {
         broadcast(server, Some(id), &Packet::Explode { at: center, radius: blast });
         explosion_damage(server, id, center, blast);
-        ignite_around(server, center, blast);
+        let fire = exploded.map_or(0.0, |w| w.spec().incendiary);
+        ignite_around(server, center, blast.max(fire));
     }
 }
 
