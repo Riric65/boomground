@@ -537,8 +537,11 @@ pub fn receive(
                 let now = chat_time;
                 chat.push(line, now, from == 0);
             }
+            // Pas de voix sur téléphone : personne ne viderait la file.
             Packet::Voice { from, data, .. } => {
-                voice_in.push((from, data));
+                if !crate::touch::is_touch_platform() {
+                    voice_in.push((from, data));
+                }
             }
             Packet::Driving { body } => {
                 d.game.driving = body;

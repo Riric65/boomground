@@ -704,7 +704,10 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                             node.row_gap = px(2.0);
                             cols.spawn((ui::card(), shadow())).insert(node.clone()).with_children(|c| {
                                 c.spawn(ui::text(&font, "JEU ET CONTRÔLES", 13.0, ui::MUTED));
-                                setting_row(c, &font, "Sensibilité de la souris", SettingKind::Sensitivity);
+                                let touch = crate::touch::is_touch_platform();
+                                if !touch {
+                                    setting_row(c, &font, "Sensibilité de la souris", SettingKind::Sensitivity);
+                                }
                                 setting_row(c, &font, "Champ de vision", SettingKind::Fov);
                                 setting_row(c, &font, "Secousses de caméra", SettingKind::Shake);
                                 switch_row(c, &font, "Inverser l'axe vertical", settings.invert_y, InvertSwitch);
@@ -718,8 +721,11 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                                 setting_row(c, &font, "Volume général", SettingKind::Volume);
                                 setting_row(c, &font, "Bruitages", SettingKind::Sfx);
                                 setting_row(c, &font, "Musique", SettingKind::Music);
-                                setting_row(c, &font, "Voix de proximité", SettingKind::VoiceMode);
-                                setting_row(c, &font, "Volume des voix", SettingKind::VoiceVolume);
+                                // Voix : micro et touche G, ordinateur seulement.
+                                if !touch {
+                                    setting_row(c, &font, "Voix de proximité", SettingKind::VoiceMode);
+                                    setting_row(c, &font, "Volume des voix", SettingKind::VoiceVolume);
+                                }
                             });
                             cols.spawn((ui::card(), shadow())).insert(node).with_children(|c| {
                                 c.spawn(ui::text(&font, "AFFICHAGE", 13.0, ui::MUTED));
@@ -730,7 +736,9 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                                 setting_row(c, &font, "Poussière et fumée", SettingKind::Particles);
                                 switch_row(c, &font, "Halo lumineux (bloom)", settings.bloom, BloomSwitch);
                                 setting_row(c, &font, "Limite d'images", SettingKind::Fps);
-                                switch_row(c, &font, "Plein écran", settings.fullscreen, FullscreenSwitch);
+                                if !crate::touch::is_touch_platform() {
+                                    switch_row(c, &font, "Plein écran", settings.fullscreen, FullscreenSwitch);
+                                }
                                 c.spawn(ui::text(&font, "INTERFACE", 13.0, ui::MUTED));
                                 switch_row(c, &font, "Afficher les FPS", settings.show_fps, ShowFpsSwitch);
                                 switch_row(c, &font, "Afficher le viseur", settings.crosshair, CrosshairSwitch);
@@ -965,7 +973,7 @@ pub fn visibility(
     }
     let installed = install::is_installed_copy();
     for (mut n, started_only) in &mut roots.p4() {
-        show(&mut n, if started_only { game.started } else { installed });
+        show(&mut n, if started_only { game.started } else { installed && !crate::touch::is_touch_platform() });
     }
     let host = lobby.is_host();
     for (mut n, host_only) in &mut roots.p5() {

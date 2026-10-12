@@ -43,6 +43,8 @@ pub enum Action {
     Jump,
     Reload,
     Interact,
+    /// Action secondaire (clic droit) : faire sauter la C4, changer de matériau.
+    Alt,
     /// Arme précédente / suivante dans la barre.
     PrevWeapon,
     NextWeapon,
@@ -63,6 +65,7 @@ pub struct TouchState {
     pub jump: bool,
     pub reload: bool,
     pub interact: bool,
+    pub alt: bool,
     pub cycle: i8,
     pub category: Option<usize>,
 }
@@ -132,6 +135,11 @@ fn round_button(size: f32, action: Action) -> impl Bundle {
 }
 
 pub fn setup(mut commands: Commands, font: Res<UiFont>) {
+    // Sur ordinateur, rien n'est créé : ces nœuds plein écran « pickables »
+    // s'afficheraient et avaleraient la souris.
+    if !is_touch_platform() {
+        return;
+    }
     commands
         .spawn((
             TouchRoot,
@@ -189,7 +197,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                     position_type: PositionType::Absolute,
                     right: px(24.0),
                     bottom: px(150.0),
-                    width: px(260.0),
+                    width: px(300.0),
                     height: px(190.0),
                     justify_content: JustifyContent::SpaceBetween,
                     align_items: AlignItems::FlexEnd,
@@ -221,7 +229,9 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                     ..default()
                 })
                 .with_children(|line| {
-                    line.spawn(round_button(78.0, Action::Interact))
+                    line.spawn(round_button(66.0, Action::Alt))
+                        .with_child(ui::label(&font, "ALT", 18.0, ui::TEXT));
+                    line.spawn(round_button(66.0, Action::Interact))
                         .with_child(ui::label(&font, "E", 26.0, ui::MUTED));
                     line.spawn((
                         TouchButton(Action::Fire),
@@ -326,6 +336,7 @@ pub fn pointer(
                     Action::Jump => state.jump = true,
                     Action::Reload => state.reload = true,
                     Action::Interact => state.interact = true,
+                    Action::Alt => state.alt = true,
                     Action::PrevWeapon => state.cycle = -1,
                     Action::NextWeapon => state.cycle = 1,
                     Action::Category(i) => state.category = Some(i),
@@ -452,6 +463,7 @@ pub fn clear(mut state: ResMut<TouchState>) {
     state.jump = false;
     state.reload = false;
     state.interact = false;
+    state.alt = false;
     state.cycle = 0;
     state.category = None;
     state.look = Vec2::ZERO;

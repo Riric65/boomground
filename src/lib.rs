@@ -105,7 +105,7 @@ pub fn run() {
                 fx::setup_fire,
                 fx::setup_particles,
                 music::setup,
-                rpc::setup,
+                rpc::setup.run_if(desktop),
                 world::setup_voxel_assets,
                 world::build_level,
                 player::spawn_player,
@@ -117,7 +117,7 @@ pub fn run() {
                 shop::setup,
                 ui::setup_toasts,
                 chat::setup,
-                voice::setup_indicator,
+                voice::setup_indicator.run_if(desktop),
                 menu::initial_phase,
                 debug::setup,
             )
@@ -211,16 +211,16 @@ pub fn run() {
                 music::update,
                 hud::loading_screen,
                 hud::damage_overlay,
-                rpc::update,
+                rpc::update.run_if(desktop),
                 vehicle::controls,
                 vehicle::engine_sound,
-                voice::update,
-                voice::indicator,
+                voice::update.run_if(desktop),
+                voice::indicator.run_if(desktop),
                 menu::world_list,
                 menu::solo_pause,
                 menu::server_list_ui,
                 menu::map_size_highlight,
-                window_icon,
+                window_icon.run_if(desktop),
                 touch::clear.run_if(touch::on_touch),
                 ui_scale,
                 portrait,
@@ -299,6 +299,12 @@ fn ui_scale(window: Query<&Window, With<bevy::window::PrimaryWindow>>, mut scale
     if (scale.0 - s).abs() > 0.01 {
         scale.0 = s;
     }
+}
+
+/// Condition de système : fonctions propres à l'ordinateur (Discord, micro,
+/// icône de fenêtre), sans objet sur téléphone.
+fn desktop() -> bool {
+    !touch::is_touch_platform()
 }
 
 /// Point d'entrée Android : `#[bevy_main]` exporte `android_main`, que

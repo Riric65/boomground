@@ -743,7 +743,7 @@ pub fn act(
 
     match spec.kind {
         Kind::Build => {
-            if grabbed && buttons.just_pressed(MouseButton::Right) {
+            if grabbed && (buttons.just_pressed(MouseButton::Right) || touch.alt) {
                 let n = world::mat::BUILD.len();
                 d.game.build_index = (d.game.build_index + 1) % n;
                 d.sound(SfxKind::Beep, 0.4, origin);
@@ -993,7 +993,7 @@ pub fn act(
                 hands.swing = if next >= 1.0 { None } else { Some(next) };
             }
             // Clic droit : la C4 saute (toutes celles qu'on a posées).
-            if spec.remote && grabbed && buttons.just_pressed(MouseButton::Right) {
+            if spec.remote && grabbed && (buttons.just_pressed(MouseButton::Right) || touch.alt) {
                 let mut k = 0;
                 for mut bomb in &mut bombs {
                     if bomb.local && bomb.id.spec().remote && bomb.fuse.is_none() {

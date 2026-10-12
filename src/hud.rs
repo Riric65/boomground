@@ -503,19 +503,19 @@ pub fn update(
             let stock = if infinite { "illimité".to_string() } else { format!("× {}", slot.reserve) };
             let hint = if spec.remote {
                 let placed = bombs.iter().filter(|b| b.local && b.id == id).count();
-                format!("{placed} posée(s) · clic droit : BOUM")
+                format!("{placed} posée(s) · {} : BOUM", if crate::touch::is_touch_platform() { "ALT" } else { "clic droit" })
             } else if spec.trigger > 0.0 {
                 "Mine : se déclenche à l'approche".to_string()
             } else if spec.kind == Kind::Placed && spec.fuse > 0.0 {
                 format!("Minuterie de {:.0} s : cours !", spec.fuse)
             } else {
-                "Clic gauche : lancer".to_string()
+                if crate::touch::is_touch_platform() { "TIR : lancer" } else { "Clic gauche : lancer" }.to_string()
             };
             (stock, hint)
         }
         Kind::Build => (
             crate::world::material_name(game.build_material()).to_string(),
-            "Clic : poser · clic droit : matériau".to_string(),
+            if crate::touch::is_touch_platform() { "TIR : poser · ALT : matériau" } else { "Clic : poser · clic droit : matériau" }.to_string(),
         ),
         Kind::Melee => (
             format!("{:.1} m", spec.radius),
