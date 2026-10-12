@@ -63,7 +63,7 @@ priment sur le fichier.
   [14:05:10] [Server thread/INFO]: Sam a été tué par Alex (balle)
   [14:06:00] [Server thread/WARN]: Alex expulsé : déplacement trop rapide
   ```
-  L'heure est en UTC.
+  L'heure est celle de la machine du serveur.
 - **Bannis** : `banned-players.txt` (un pseudo par ligne).
 
 ## Commandes de la console

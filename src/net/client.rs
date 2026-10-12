@@ -276,6 +276,28 @@ pub fn player_color(id: u16) -> Color {
     Color::hsl(hue, 0.65, 0.55)
 }
 
+/// Génération de la carte en arrière-plan + paquets mis en attente.
+#[derive(Resource, Default)]
+pub struct WorldLoading {
+    rx: Option<std::sync::Mutex<std::sync::mpsc::Receiver<crate::world::VoxelWorld>>>,
+    backlog: Vec<Packet>,
+    /// Date d'installation de la carte (début du maillage).
+    pub installed_at: Option<std::time::Instant>,
+}
+
+/// Ressources et requêtes supplémentaires de [`receive`] (Bevy limite à 16
+/// le nombre de paramètres d'un système).
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ReceiveExtras<'w, 's> {
+    mirror: ResMut<'w, crate::net::mirror::Mirror>,
+    net_blocks: Query<'w, 's, &'static mut crate::net::mirror::NetBlock>,
+    net_bodies: Query<'w, 's, &'static mut crate::net::mirror::NetBody>,
+    camera: Query<'w, 's, &'static GlobalTransform, With<crate::player::WorldCamera>>,
+    particles: Res<'w, crate::fx::ParticleAssets>,
+    density: Res<'w, crate::fx::ParticleDensity>,
+    puffs: Query<'w, 's, (), With<crate::fx::Puff>>,
+}
+
 /// Applique ce que le serveur a décidé.
 #[allow(clippy::too_many_arguments)]
 pub fn receive(
@@ -290,11 +312,18 @@ pub fn receive(
     tags: Query<(Entity, &NameTag)>,
     bombs: Query<(Entity, &crate::weapon::Bomb, &Transform), Without<RemotePlayer>>,
     ragdolls: Query<(Entity, &crate::vitals::Ragdoll)>,
-    mut mirror: ResMut<crate::net::mirror::Mirror>,
-    mut net_blocks: Query<&mut crate::net::mirror::NetBlock>,
-    mut net_bodies: Query<&mut crate::net::mirror::NetBody>,
-    camera: Query<&GlobalTransform, With<crate::player::WorldCamera>>,
+    mut fx_params: ReceiveExtras,
+    mut loading: ResMut<WorldLoading>,
 ) {
+    let ReceiveExtras {
+        ref mut mirror,
+        ref mut net_blocks,
+        ref mut net_bodies,
+        ref camera,
+        ref particles,
+        ref density,
+        ref puffs,
+    } = fx_params;
     let camera_pos = camera.single().map(|c| c.translation()).unwrap_or(Vec3::ZERO);
     if !d.net.is_online() {
         // Hors ligne : plus personne d'autre dans le monde.
@@ -307,7 +336,28 @@ pub fn receive(
         return;
     }
 
-    for packet in d.net.drain() {
+    // Carte en cours de génération (fil séparé) : les paquets suivants
+    // attendent, ils s'appliquent à la nouvelle carte.
+    let mut queue: std::collections::VecDeque<Packet> = std::mem::take(&mut loading.backlog).into();
+    if let Some(rx) = &loading.rx {
+        let got = rx.lock().ok().and_then(|r| r.try_recv().ok());
+        match got {
+            Some(mut new_world) => {
+                new_world.generation = d.world.generation.wrapping_add(1);
+                *d.world = new_world;
+                loading.rx = None;
+                loading.installed_at = Some(std::time::Instant::now());
+            }
+            None => {
+                loading.backlog = queue.into();
+                loading.backlog.extend(d.net.drain());
+                return;
+            }
+        }
+    }
+    queue.extend(d.net.drain());
+
+    while let Some(packet) = queue.pop_front() {
         match packet {
             Packet::Welcome {
                 id,
@@ -323,7 +373,19 @@ pub fn receive(
                 d.game.seed = seed;
                 d.game.mode = lobby.mode;
                 d.game.reset_inventory();
-                d.world.rebuild(seed);
+                // Génération de la ville sans bloquer l'affichage.
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ = std::thread::Builder::new().name("boomground-ville".into()).spawn(move || {
+                    let mut w = crate::world::VoxelWorld::new();
+                    w.rebuild(seed);
+                    let _ = tx.send(w);
+                });
+                loading.rx = Some(std::sync::Mutex::new(rx));
+                loading.installed_at = None;
+                d.game.loading = true;
+                d.game.loading_progress = 0.0;
+                loading.backlog = queue.drain(..).collect();
+                break;
             }
             Packet::Refused { reason } => {
                 d.net.disconnect();
@@ -351,10 +413,24 @@ pub fn receive(
                 // Autorité du serveur : on applique (idempotent : un voxel
                 // déjà cassé en local est ignoré). Les gravats arrivent par
                 // `Blocks`.
-                for c in cells {
+                let mut sum = Vec3::ZERO;
+                let mut n = 0;
+                for c in &cells {
                     let cell = IVec3::new(c[0] as i32, c[1] as i32, c[2] as i32);
                     if d.world.is_solid(cell) {
                         d.world.set(cell, false, 0);
+                        sum += d.world.cell_center(cell);
+                        n += 1;
+                    }
+                }
+                // Gros écroulement : nuage de poussière.
+                if n >= 25 {
+                    let at = sum / n as f32;
+                    let existing = puffs.iter().len();
+                    crate::fx::dust(&mut d.commands, &particles, density.0, existing, at, n as f32, false);
+                    if n >= 60 {
+                        let vol = (0.5 + n as f32 / 800.0).min(1.4);
+                        crate::fx::play_at(&mut d.commands, &d.bank, crate::fx::SfxKind::Rumble, vol, at);
                     }
                 }
             }
@@ -362,7 +438,7 @@ pub fn receive(
                 mirror.add_blocks(&mut d.commands, &d.assets, &list);
             }
             Packet::BlockPose { list } => {
-                mirror.pose_blocks(&mut d.commands, &list, &mut net_blocks);
+                mirror.pose_blocks(&mut d.commands, &list, net_blocks);
             }
             Packet::BlockRemove { ids } => {
                 mirror.remove_blocks(&mut d.commands, &ids);
@@ -371,9 +447,16 @@ pub fn receive(
                 mirror.body_part(&mut d.commands, &mut meshes, &d.assets, id, dims, com, part, total, data);
             }
             Packet::BodyPose { list } => {
-                mirror.pose_bodies(&list, &mut net_bodies);
+                mirror.pose_bodies(&list, net_bodies);
             }
             Packet::BodyRemove { id } => {
+                if let Some(e) = mirror.body_entity(id) {
+                    if let Ok(b) = net_bodies.get(e) {
+                        let existing = puffs.iter().len();
+                        crate::fx::dust(&mut d.commands, &particles, density.0, existing, b.target_pos, 240.0, false);
+                        crate::fx::play_at(&mut d.commands, &d.bank, crate::fx::SfxKind::Rumble, 1.3, b.target_pos);
+                    }
+                }
                 mirror.remove_body(&mut d.commands, id);
             }
             Packet::Inv { money, earned, slots } => {
@@ -405,11 +488,43 @@ pub fn receive(
             Packet::Impact { at, power } => {
                 let kind = if power > 9.0 { crate::fx::SfxKind::BigBoom } else { crate::fx::SfxKind::Boom };
                 crate::fx::play_at(&mut d.commands, &d.bank, kind, (0.3 + power * 0.04).min(1.0), at);
+                crate::fx::play_at(&mut d.commands, &d.bank, crate::fx::SfxKind::Crash, (0.4 + power * 0.05).min(1.2), at);
                 d.shake.add((0.05 * power / (1.0 + at.distance(camera_pos) * 0.15)).min(0.5));
+                let existing = puffs.iter().len();
+                crate::fx::dust(&mut d.commands, &particles, density.0, existing, at, power * 14.0, false);
+            }
+            Packet::Fire { add, remove } => {
+                for c in remove {
+                    let cell = IVec3::new(c[0] as i32, c[1] as i32, c[2] as i32);
+                    if let Some(e) = mirror.fires.remove(&cell) {
+                        d.commands.entity(e).despawn();
+                    }
+                }
+                for c in add {
+                    let cell = IVec3::new(c[0] as i32, c[1] as i32, c[2] as i32);
+                    if mirror.fires.contains_key(&cell) || mirror.fires.len() >= crate::fx::MAX_FLAMES {
+                        continue;
+                    }
+                    let at = d.world.cell_center(cell);
+                    let phase = (cell.x * 31 + cell.y * 17 + cell.z * 7) as f32 * 0.137;
+                    let e = crate::fx::flame(&mut d.commands, &particles, at, phase);
+                    mirror.fires.insert(cell, e);
+                }
             }
             Packet::Reset { seed } => {
                 d.game.seed = seed;
-                d.world.rebuild(seed);
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ = std::thread::Builder::new().name("boomground-ville".into()).spawn(move || {
+                    let mut w = crate::world::VoxelWorld::new();
+                    w.rebuild(seed);
+                    let _ = tx.send(w);
+                });
+                loading.rx = Some(std::sync::Mutex::new(rx));
+                loading.installed_at = None;
+                d.game.loading = true;
+                d.game.loading_progress = 0.0;
+                loading.backlog = queue.drain(..).collect();
+                break;
             }
             Packet::Player {
                 id, pos, yaw, pitch, ..

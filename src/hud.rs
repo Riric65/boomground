@@ -37,6 +37,12 @@ pub struct HpBar;
 pub struct HpPanel;
 #[derive(Component)]
 pub struct CrosshairRoot;
+#[derive(Component)]
+pub struct LoadingRoot;
+#[derive(Component)]
+pub struct LoadingBar;
+#[derive(Component)]
+pub struct LoadingText;
 
 /// Case de la barre d'armes.
 #[derive(Component)]
@@ -164,6 +170,48 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                     ..default()
                 })
                 .with_child((HudLabel::Players, ui::text(&font, "", 15.0, ui::TEXT)));
+        });
+
+    // Écran de chargement (par-dessus tout).
+    commands
+        .spawn((
+            LoadingRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                row_gap: px(18.0),
+                display: Display::None,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.03, 0.035, 0.05)),
+            GlobalZIndex(300),
+        ))
+        .with_children(|p| {
+            p.spawn(ui::text(&font, "BOOMGROUND", 54.0, ui::ACCENT));
+            p.spawn((LoadingText, ui::text(&font, "Génération de la ville…", 22.0, ui::TEXT)));
+            p.spawn((
+                Node {
+                    width: px(420.0),
+                    height: px(8.0),
+                    border_radius: BorderRadius::all(px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
+            ))
+            .with_child((
+                LoadingBar,
+                Node {
+                    width: Val::Percent(0.0),
+                    height: Val::Percent(100.0),
+                    border_radius: BorderRadius::all(px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(ui::ACCENT),
+            ));
         });
 
     // Points de vie (bas gauche).
@@ -557,6 +605,76 @@ pub fn update(
     for (label, mut t) in &mut labels {
         if let Some((_, v)) = values.iter().find(|(l, _)| l == label) {
             set(&mut t, v.clone());
+        }
+    }
+}
+
+/// Écran de chargement : ville générée en arrière-plan, puis maillage des
+/// morceaux proches. Le jeu ne démarre que quand le terrain autour du
+/// joueur est prêt (plus de saccades à l'arrivée).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn loading_screen(
+    time: Res<Time>,
+    mut game: ResMut<GameState>,
+    loading: Res<crate::net::client::WorldLoading>,
+    chunks: Res<crate::vmesh::ChunkEntities>,
+    mut root: Query<&mut Node, (With<LoadingRoot>, Without<LoadingBar>)>,
+    mut bar: Query<&mut Node, (With<LoadingBar>, Without<LoadingRoot>)>,
+    mut text: Query<&mut Text, With<LoadingText>>,
+    mut initial: Local<usize>,
+    mut calm: Local<f32>,
+) {
+    if game.loading {
+        let pending = chunks.pending_near;
+        let stage_gen = loading.installed_at.is_none();
+        if stage_gen {
+            *initial = 0;
+            *calm = 0.0;
+            // Barre indéterminée pendant la génération.
+            game.loading_progress = (game.loading_progress + time.delta_secs() * 0.15).min(0.45);
+        } else {
+            if pending > *initial {
+                *initial = pending;
+            }
+            let meshed = if *initial == 0 {
+                0.0
+            } else {
+                1.0 - pending as f32 / *initial as f32
+            };
+            game.loading_progress = 0.45 + 0.55 * meshed.clamp(0.0, 1.0);
+            let waited = loading.installed_at.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+            // Prêt : le terrain proche est maillé (et on a attendu un peu).
+            if pending == 0 && waited > 0.8 {
+                *calm += time.delta_secs();
+                if *calm > 0.2 {
+                    game.loading = false;
+                    game.loading_progress = 1.0;
+                }
+            } else {
+                *calm = 0.0;
+            }
+        }
+    }
+    for mut n in &mut root {
+        let d = if game.loading { Display::Flex } else { Display::None };
+        if n.display != d {
+            n.display = d;
+        }
+    }
+    for mut n in &mut bar {
+        let w = Val::Percent(game.loading_progress * 100.0);
+        if n.width != w {
+            n.width = w;
+        }
+    }
+    for mut t in &mut text {
+        let s = if loading.installed_at.is_none() {
+            "Génération de la ville…"
+        } else {
+            "Chargement du terrain…"
+        };
+        if t.0 != s {
+            t.0 = s.to_string();
         }
     }
 }

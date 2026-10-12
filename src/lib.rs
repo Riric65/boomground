@@ -13,6 +13,7 @@ pub mod hud;
 pub mod install;
 pub mod map;
 pub mod menu;
+pub mod music;
 pub mod net;
 pub mod perf;
 pub mod player;
@@ -37,12 +38,15 @@ use world::VoxelWorld;
 /// Lance le client (fenêtre, rendu, jeu).
 pub fn run() {
     App::new()
+        .insert_resource(bevy::audio::DefaultSpatialScale(bevy::audio::SpatialScale::new(0.1)))
         .insert_resource(ClearColor(Color::srgb(0.55, 0.70, 0.90)))
         .insert_resource(DirectionalLightShadowMap { size: 4096 })
         .insert_resource(game::load_settings())
         .init_resource::<VoxelWorld>()
         .init_resource::<debris::Rng>()
         .init_resource::<net::mirror::Mirror>()
+        .init_resource::<fx::ParticleDensity>()
+        .init_resource::<net::client::WorldLoading>()
         .init_resource::<vmesh::ChunkEntities>()
         .init_resource::<GameState>()
         .init_resource::<fx::Shake>()
@@ -78,6 +82,8 @@ pub fn run() {
                 ui::setup_font,
                 fx::setup_sounds,
                 fx::setup_fire,
+                fx::setup_particles,
+                music::setup,
                 world::setup_voxel_assets,
                 world::build_level,
                 player::spawn_player,
@@ -149,7 +155,6 @@ pub fn run() {
         .add_systems(
             Update,
             (
-                net::mirror::smooth,
                 debris::update_debris.run_if(in_game),
                 fx::fade_flashes,
                 fx::update_fireballs,
@@ -164,6 +169,10 @@ pub fn run() {
                 .after(weapon::animate_hands),
         )
         // La boucle ne tourne jamais plus vite que l'écran.
+        .add_systems(
+            Update,
+            (net::mirror::smooth, fx::update_puffs, fx::animate_flames, music::update, hud::loading_screen),
+        )
         .add_systems(Last, (perf::detect_refresh, perf::limit).chain())
         .run();
 }

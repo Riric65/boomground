@@ -18,8 +18,8 @@ const RATE: u32 = 44_100;
 // Son
 // ---------------------------------------------------------------------------
 
-/// Encode des échantillons en WAV 16 bits PCM.
-fn wav(samples: &[f32]) -> AudioSource {
+/// Encode des échantillons en WAV 16 bits PCM (mono, fréquence donnée).
+pub fn wav_rate(samples: &[f32], rate: u32) -> AudioSource {
     let data_bytes = samples.len() * 2;
     let mut bytes: Vec<u8> = Vec::with_capacity(44 + data_bytes);
 
@@ -30,8 +30,8 @@ fn wav(samples: &[f32]) -> AudioSource {
     bytes.extend_from_slice(&16u32.to_le_bytes()); // taille du bloc fmt
     bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
     bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
-    bytes.extend_from_slice(&RATE.to_le_bytes());
-    bytes.extend_from_slice(&(RATE * 2).to_le_bytes()); // octets/s
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 2).to_le_bytes()); // octets/s
     bytes.extend_from_slice(&2u16.to_le_bytes()); // alignement
     bytes.extend_from_slice(&16u16.to_le_bytes()); // bits par échantillon
     bytes.extend_from_slice(b"data");
@@ -42,6 +42,15 @@ fn wav(samples: &[f32]) -> AudioSource {
     }
 
     AudioSource { bytes: bytes.into() }
+}
+
+/// WAV à la fréquence de synthèse, **normalisé** : les sons filtrés étaient
+/// très faibles, d'où des effets à peine audibles.
+fn wav(samples: &[f32]) -> AudioSource {
+    let peak = samples.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-4);
+    let gain = 0.92 / peak;
+    let norm: Vec<f32> = samples.iter().map(|s| s * gain).collect();
+    wav_rate(&norm, RATE)
 }
 
 /// Bruit pseudo-aléatoire déterministe (LCG, pas de dépendance `rand`).
@@ -127,6 +136,51 @@ fn glass(dur: f32) -> AudioSource {
     })
 }
 
+/// Grondement grave et irrégulier : un bâtiment qui s'écroule.
+fn rumble(dur: f32) -> AudioSource {
+    let mut n = Noise(31337);
+    let (mut a, mut b) = (0.0f32, 0.0f32);
+    render(dur, |t| {
+        let raw = n.next();
+        a += (raw - a) * 0.012;
+        b += (a - b) * 0.05;
+        let wobble = 0.65 + 0.35 * (std::f32::consts::TAU * 7.0 * t).sin();
+        let env = (t * 8.0).min(1.0) * (1.0 - t / dur).powf(1.4);
+        (b * 9.0 + (std::f32::consts::TAU * 38.0 * t).sin() * 0.25) * wobble * env
+    })
+}
+
+/// Impact lourd : claquement grave et éclats de gravats.
+fn crash(dur: f32) -> AudioSource {
+    let mut n = Noise(555);
+    let mut low = 0.0f32;
+    render(dur, |t| {
+        let raw = n.next();
+        low += (raw - low) * 0.06;
+        let thump = (std::f32::consts::TAU * (62.0 - 30.0 * t) * t).sin() * (-9.0 * t).exp();
+        let debris = raw * (-14.0 * t).exp() * 0.5 + low * (-5.0 * t).exp();
+        thump * 1.1 + debris
+    })
+}
+
+/// Crépitement : claquements aléatoires brefs.
+fn crackle(dur: f32) -> AudioSource {
+    let mut n = Noise(8080);
+    let mut env = 0.0f32;
+    render(dur, |_| {
+        if n.next().abs() > 0.985 {
+            env = 1.0;
+        }
+        env *= 0.992;
+        n.next() * env
+    })
+}
+
+/// Bloc posé : petit choc sourd.
+fn thunk(dur: f32) -> AudioSource {
+    render(dur, |t| (std::f32::consts::TAU * (150.0 - 400.0 * t) * t).sin() * (-28.0 * t).exp())
+}
+
 /// Les sons du jeu.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum SfxKind {
@@ -142,9 +196,17 @@ pub enum SfxKind {
     Buy,
     Glass,
     Drill,
+    /// Grondement d'un écroulement.
+    Rumble,
+    /// Choc lourd d'un bloc qui s'écrase.
+    Crash,
+    /// Crépitement du feu.
+    Crackle,
+    /// Pose d'un bloc.
+    Thunk,
 }
 
-const ALL_SFX: [SfxKind; 12] = [
+const ALL_SFX: [SfxKind; 16] = [
     SfxKind::Swing,
     SfxKind::Hit,
     SfxKind::Shot,
@@ -157,6 +219,10 @@ const ALL_SFX: [SfxKind; 12] = [
     SfxKind::Buy,
     SfxKind::Glass,
     SfxKind::Drill,
+    SfxKind::Rumble,
+    SfxKind::Crash,
+    SfxKind::Crackle,
+    SfxKind::Thunk,
 ];
 
 /// Son synthétisé correspondant à un effet.
@@ -174,6 +240,10 @@ fn source_for(kind: SfxKind) -> AudioSource {
         SfxKind::Buy => beep(660.0, 0.12),
         SfxKind::Glass => glass(0.35),
         SfxKind::Drill => noise_burst(0.08, 30.0, 77, 0.6),
+        SfxKind::Rumble => rumble(3.2),
+        SfxKind::Crash => crash(1.1),
+        SfxKind::Crackle => crackle(0.7),
+        SfxKind::Thunk => thunk(0.18),
     }
 }
 
@@ -454,6 +524,206 @@ mod tests {
     fn every_sound_generates_samples() {
         for kind in ALL_SFX {
             assert!(source_for(kind).bytes.len() > 100, "{kind:?}");
+        }
+    }
+}
+
+// ----------------------------------------------------------------------
+// Poussière, fumée, flammes
+// ----------------------------------------------------------------------
+
+/// Nombre maximal de bouffées simultanées.
+const MAX_PUFFS: usize = 220;
+/// Nombre maximal de flammes affichées.
+pub const MAX_FLAMES: usize = 450;
+/// Niveaux d'opacité d'une bouffée (du plus opaque au plus transparent).
+const PUFF_LEVELS: usize = 6;
+
+/// Maillages et matériaux des effets de particules.
+#[derive(Resource)]
+pub struct ParticleAssets {
+    sphere: Handle<Mesh>,
+    cube: Handle<Mesh>,
+    /// `[teinte][niveau]` : 0 poussière, 1 fumée.
+    puffs: [Vec<Handle<StandardMaterial>>; 2],
+    flame: [Handle<StandardMaterial>; 2],
+}
+
+/// Densité des particules (0 aucune, 1 réduite, 2 pleine).
+#[derive(Resource)]
+pub struct ParticleDensity(pub u8);
+
+impl Default for ParticleDensity {
+    fn default() -> Self {
+        Self(2)
+    }
+}
+
+/// Une bouffée de poussière ou de fumée.
+#[derive(Component)]
+pub struct Puff {
+    age: f32,
+    life: f32,
+    vel: Vec3,
+    size0: f32,
+    size1: f32,
+    tint: usize,
+    level: usize,
+}
+
+/// Une flamme (un voxel en feu).
+#[derive(Component)]
+pub struct Flame {
+    pub phase: f32,
+    pub base: Vec3,
+    smoke: f32,
+}
+
+pub fn setup_particles(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+    let mut puffs: [Vec<Handle<StandardMaterial>>; 2] = [Vec::new(), Vec::new()];
+    let tints = [Color::srgb(0.66, 0.62, 0.56), Color::srgb(0.16, 0.16, 0.17)];
+    for (t, tint) in tints.iter().enumerate() {
+        for l in 0..PUFF_LEVELS {
+            let alpha = 0.5 * (1.0 - l as f32 / PUFF_LEVELS as f32);
+            puffs[t].push(materials.add(StandardMaterial {
+                base_color: tint.with_alpha(alpha),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                ..default()
+            }));
+        }
+    }
+    let flame = [
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.45, 0.08),
+            emissive: LinearRgba::rgb(7.0, 2.2, 0.2),
+            unlit: true,
+            ..default()
+        }),
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.85, 0.3),
+            emissive: LinearRgba::rgb(8.0, 6.0, 1.2),
+            unlit: true,
+            ..default()
+        }),
+    ];
+    commands.insert_resource(ParticleAssets {
+        sphere: meshes.add(Sphere::new(0.5).mesh().ico(1).unwrap()),
+        cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+        puffs,
+        flame,
+    });
+}
+
+/// Bouffées de poussière : `amount` ~ nombre de voxels, ou force.
+pub fn dust(commands: &mut Commands, p: &ParticleAssets, density: u8, existing: usize, at: Vec3, amount: f32, smoke: bool) {
+    if density == 0 || existing >= MAX_PUFFS {
+        return;
+    }
+    let scale = if density == 1 { 0.5 } else { 1.0 };
+    let n = ((amount * 0.12).clamp(2.0, 16.0) * scale) as usize;
+    let seed = (at.x * 12.9898 + at.y * 78.233 + at.z * 37.719).sin() * 43758.547;
+    let mut s = seed.fract().abs();
+    let mut rnd = move || {
+        s = (s * 9301.0 + 49297.0) % 233280.0;
+        s / 233280.0
+    };
+    let size = (0.6 + amount.sqrt() * 0.09).min(3.5);
+    for _ in 0..n {
+        let a = rnd() * std::f32::consts::TAU;
+        let out = 0.6 + rnd() * 2.2;
+        let tint = if smoke { 1 } else { 0 };
+        commands.spawn((
+            Puff {
+                age: 0.0,
+                life: 1.6 + rnd() * 2.2,
+                vel: Vec3::new(a.cos() * out, 0.5 + rnd() * 1.6, a.sin() * out),
+                size0: size * (0.5 + rnd() * 0.5),
+                size1: size * (2.2 + rnd() * 1.5),
+                tint,
+                level: 0,
+            },
+            Mesh3d(p.sphere.clone()),
+            MeshMaterial3d(p.puffs[tint][0].clone()),
+            Transform::from_translation(at + Vec3::new(rnd() - 0.5, rnd() * 0.4, rnd() - 0.5) * size).with_scale(Vec3::splat(0.2)),
+            bevy::light::NotShadowCaster,
+        ));
+    }
+}
+
+/// Crée une flamme sur un voxel.
+pub fn flame(commands: &mut Commands, p: &ParticleAssets, at: Vec3, phase: f32) -> Entity {
+    commands
+        .spawn((
+            Flame {
+                phase,
+                base: at,
+                smoke: phase.fract(),
+            },
+            Mesh3d(p.cube.clone()),
+            MeshMaterial3d(p.flame[0].clone()),
+            Transform::from_translation(at).with_scale(Vec3::splat(0.5)),
+            bevy::light::NotShadowCaster,
+        ))
+        .id()
+}
+
+/// Les bouffées grossissent, montent, s'éclaircissent et disparaissent.
+pub fn update_puffs(
+    time: Res<Time>,
+    assets: Res<ParticleAssets>,
+    mut commands: Commands,
+    mut puffs: Query<(Entity, &mut Puff, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
+) {
+    let dt = time.delta_secs().min(0.05);
+    for (entity, mut p, mut t, mut m) in &mut puffs {
+        p.age += dt;
+        if p.age >= p.life {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let k = p.age / p.life;
+        t.translation += p.vel * dt;
+        p.vel *= 1.0 - (1.4 * dt).min(0.9);
+        p.vel.y += 0.35 * dt;
+        t.scale = Vec3::splat(p.size0 + (p.size1 - p.size0) * (1.0 - (1.0 - k).powi(2)));
+        let level = ((k * PUFF_LEVELS as f32) as usize).min(PUFF_LEVELS - 1);
+        if level != p.level {
+            p.level = level;
+            m.0 = assets.puffs[p.tint][level].clone();
+        }
+    }
+}
+
+/// Scintillement des flammes et fumée qui s'en échappe.
+pub fn animate_flames(
+    time: Res<Time>,
+    bank: Res<SfxBank>,
+    mut crackle_cooldown: Local<f32>,
+    assets: Res<ParticleAssets>,
+    density: Res<ParticleDensity>,
+    mut commands: Commands,
+    puffs: Query<(), With<Puff>>,
+    mut flames: Query<(&mut Flame, &mut Transform), Without<Puff>>,
+) {
+    let t = time.elapsed_secs();
+    let dt = time.delta_secs();
+    let mut count = puffs.iter().len();
+    *crackle_cooldown -= dt;
+    for (mut f, mut tr) in &mut flames {
+        if *crackle_cooldown <= 0.0 && (t * 3.0 + f.phase * 11.0).sin() > 0.995 {
+            *crackle_cooldown = 0.35;
+            play_at(&mut commands, &bank, SfxKind::Crackle, 0.45, f.base);
+        }
+        let a = (t * 9.0 + f.phase * 40.0).sin() * 0.5 + 0.5;
+        let b = (t * 13.0 + f.phase * 17.0).cos() * 0.5 + 0.5;
+        tr.scale = Vec3::new(0.28 + a * 0.2, 0.45 + b * 0.55, 0.28 + b * 0.2);
+        tr.translation = f.base + Vec3::new(0.0, tr.scale.y * 0.4 - 0.1, 0.0);
+        f.smoke += dt * (0.4 + f.phase.fract());
+        if f.smoke > 3.0 && density.0 > 0 && count < MAX_PUFFS - 20 {
+            f.smoke = 0.0;
+            count += 1;
+            dust(&mut commands, &assets, density.0, count, f.base + Vec3::Y * 0.5, 14.0, true);
         }
     }
 }

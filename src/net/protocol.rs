@@ -136,6 +136,8 @@ pub enum Packet {
     Reset { seed: u64 },
     /// Client → serveur : état du jeu en pause (solo).
     Ping,
+    /// Serveur → clients : voxels qui prennent feu / s'éteignent.
+    Fire { add: Vec<[u16; 3]>, remove: Vec<[u16; 3]> },
 }
 
 /// Un bloc de gravats annoncé aux clients.
@@ -463,6 +465,17 @@ impl Packet {
                 w.u64(*seed);
             }
             Packet::Ping => w.u8(35),
+            Packet::Fire { add, remove } => {
+                w.u8(36);
+                for list in [add, remove] {
+                    w.u16(list.len() as u16);
+                    for c in list {
+                        w.u16(c[0]);
+                        w.u16(c[1]);
+                        w.u16(c[2]);
+                    }
+                }
+            }
         }
 
         let body = w.0;
@@ -651,6 +664,17 @@ impl Packet {
             33 => Packet::Command { text: cur.string()? },
             34 => Packet::Reset { seed: cur.u64()? },
             35 => Packet::Ping,
+            36 => {
+                let mut lists: [Vec<[u16; 3]>; 2] = [Vec::new(), Vec::new()];
+                for list in lists.iter_mut() {
+                    let n = cur.u16()?;
+                    for _ in 0..n {
+                        list.push([cur.u16()?, cur.u16()?, cur.u16()?]);
+                    }
+                }
+                let [add, remove] = lists;
+                Packet::Fire { add, remove }
+            }
             _ => return None,
         })
     }

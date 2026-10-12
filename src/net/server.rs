@@ -226,6 +226,10 @@ struct ServerState {
     responder: Responder,
     shutdown: Arc<AtomicBool>,
     console: Option<Mutex<mpsc::Receiver<String>>>,
+    /// Voxels en feu : temps de combustion restant.
+    fire: HashMap<IVec3, f32>,
+    last_fire: Instant,
+    fire_rng: u64,
 }
 
 // ----------------------------------------------------------------------
@@ -441,6 +445,9 @@ fn server_app(
         responder: Responder::new(),
         shutdown,
         console: console.map(Mutex::new),
+        fire: HashMap::new(),
+        last_fire: now,
+        fire_rng: 0x2545_F491_4F6C_DD1D,
     })
     .add_systems(Update, (stop_if_asked, accept_clients, serve).chain());
     Ok(app)
@@ -825,6 +832,154 @@ fn flush_events(server: &mut ServerState) {
 }
 
 // ----------------------------------------------------------------------
+// Feu
+// ----------------------------------------------------------------------
+
+fn fire_rand(server: &mut ServerState) -> f32 {
+    let mut x = server.fire_rng;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    server.fire_rng = x;
+    (x >> 40) as f32 / (1u64 << 24) as f32
+}
+
+/// Une explosion enflamme les voxels inflammables proches.
+fn ignite_around(server: &mut ServerState, center: Vec3, radius: f32) {
+    const MAX_FIRES: usize = 3500;
+    let r = radius * 1.5 + 0.8;
+    let c0 = server.world.world_to_cell(center - Vec3::splat(r));
+    let c1 = server.world.world_to_cell(center + Vec3::splat(r));
+    let mut added: Vec<[u16; 3]> = Vec::new();
+    'scan: for x in c0.x..=c1.x {
+        for y in c0.y..=c1.y {
+            for z in c0.z..=c1.z {
+                let c = IVec3::new(x, y, z);
+                if !server.world.is_solid(c) || server.fire.contains_key(&c) {
+                    continue;
+                }
+                let m = server.world.material(c);
+                if !crate::world::flammable(m) {
+                    continue;
+                }
+                if server.world.cell_center(c).distance(center) > r || fire_rand(server) > 0.55 {
+                    continue;
+                }
+                if server.fire.len() >= MAX_FIRES {
+                    break 'scan;
+                }
+                let t = crate::world::burn_time(m) * (0.7 + fire_rand(server) * 0.6);
+                server.fire.insert(c, t);
+                added.push([c.x as u16, c.y as u16, c.z as u16]);
+            }
+        }
+    }
+    if !added.is_empty() {
+        for chunk in added.chunks(4000) {
+            broadcast(server, None, &Packet::Fire { add: chunk.to_vec(), remove: Vec::new() });
+        }
+    }
+}
+
+/// Avance le feu : propagation, voxels consumés, brûlures.
+fn fire_tick(server: &mut ServerState, dt: f32) {
+    if server.fire.is_empty() {
+        return;
+    }
+    const NEIGHBORS: [IVec3; 6] = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+    let cells: Vec<IVec3> = server.fire.keys().copied().collect();
+    let mut added: Vec<[u16; 3]> = Vec::new();
+    let mut gone: Vec<IVec3> = Vec::new();
+    let mut burnt: Vec<IVec3> = Vec::new();
+    for c in cells {
+        // Un voxel détruit entre-temps ne brûle plus.
+        if !server.world.is_solid(c) {
+            server.fire.remove(&c);
+            gone.push(c);
+            continue;
+        }
+        // Propagation : le feu monte plus volontiers qu'il ne descend.
+        if fire_rand(server) < 0.5 * dt * 2.0 {
+            let o = NEIGHBORS[(fire_rand(server) * 6.0) as usize % 6];
+            let up = if o.y > 0 { 1.0 } else { 0.5 };
+            let n = c + o;
+            if server.world.is_solid(n)
+                && !server.fire.contains_key(&n)
+                && server.fire.len() < 3500
+                && crate::world::flammable(server.world.material(n))
+                && fire_rand(server) < 0.6 * up
+            {
+                let m = server.world.material(n);
+                let t = crate::world::burn_time(m) * (0.7 + fire_rand(server) * 0.6);
+                server.fire.insert(n, t);
+                added.push([n.x as u16, n.y as u16, n.z as u16]);
+            }
+        }
+        if let Some(t) = server.fire.get_mut(&c) {
+            *t -= dt;
+            if *t <= 0.0 {
+                burnt.push(c);
+            }
+        }
+    }
+    for c in &burnt {
+        server.fire.remove(c);
+        server.world.set(*c, false, 0);
+    }
+    let mut removed: Vec<[u16; 3]> = gone.iter().map(|c| [c.x as u16, c.y as u16, c.z as u16]).collect();
+    removed.extend(burnt.iter().map(|c| [c.x as u16, c.y as u16, c.z as u16]));
+    if !added.is_empty() || !removed.is_empty() {
+        broadcast(server, None, &Packet::Fire { add: added, remove: removed });
+    }
+    if !burnt.is_empty() {
+        // Ce qui brûle peut faire tomber ce qu'il portait.
+        let mut all = burnt.clone();
+        let comps = if server.config.rules.gravity_collapse {
+            server.world.collapse_components(&burnt)
+        } else {
+            Vec::new()
+        };
+        for comp in &comps {
+            all.extend_from_slice(comp);
+        }
+        broadcast_removed(server, &all);
+        if !comps.is_empty() {
+            let mut ev = Vec::new();
+            {
+                let s = &mut *server;
+                s.sim.form_bodies(&s.world, comps, &mut ev);
+            }
+            server.events.append(&mut ev);
+            flush_events(server);
+        }
+    }
+    // Brûlures : à moins de ~1,2 m d'une flamme.
+    let victims: Vec<(u16, Vec3)> = server
+        .clients
+        .iter()
+        .filter(|(_, c)| c.joined && c.placed && c.dead_until.is_none())
+        .map(|(&id, c)| (id, c.pos + Vec3::Y * 0.8))
+        .collect();
+    for (id, p) in victims {
+        let cell = server.world.world_to_cell(p);
+        let mut near = false;
+        'n: for dx in -2..=2 {
+            for dy in -2..=2 {
+                for dz in -2..=2 {
+                    if server.fire.contains_key(&(cell + IVec3::new(dx, dy, dz))) {
+                        near = true;
+                        break 'n;
+                    }
+                }
+            }
+        }
+        if near {
+            hurt(server, id, None, 9.0 * dt, p, Vec3::ZERO, "brûlé");
+        }
+    }
+}
+
+// ----------------------------------------------------------------------
 // Joueurs : dégâts, départ, expulsion, sauvegarde
 // ----------------------------------------------------------------------
 
@@ -1087,6 +1242,7 @@ fn reset_world(server: &mut ServerState, seed: u64) {
     server.sim.clear();
     server.history.clear();
     server.events.clear();
+    server.fire.clear();
     server.config.seed = seed;
     logger::info(format!("Nouvelle ville, seed {seed}"));
     broadcast(server, None, &Packet::Reset { seed });
@@ -1182,6 +1338,11 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
         }
         flush_events(&mut server);
         crush_and_fall(&mut server, now);
+        let since = now.duration_since(server.last_fire).as_secs_f32();
+        if since >= 0.25 {
+            server.last_fire = now;
+            fire_tick(&mut server, since);
+        }
     }
 
     // Recharges terminées.
@@ -1722,6 +1883,10 @@ fn handle_join(server: &mut ServerState, id: u16, name: String, token: u64, vers
             stream.push(Packet::DoorState { door: i as u16, open: true }.encode());
         }
     }
+    let fires: Vec<[u16; 3]> = server.fire.keys().map(|c| [c.x as u16, c.y as u16, c.z as u16]).collect();
+    for chunk in fires.chunks(4000) {
+        stream.push(Packet::Fire { add: chunk.to_vec(), remove: Vec::new() }.encode());
+    }
 
     // Données d'un joueur déjà connu (même nom).
     let saved = server.players.get(&unique).cloned();
@@ -2087,6 +2252,7 @@ fn handle_hit(server: &mut ServerState, id: u16, kind: HitKind, origin: Vec3, di
     if kind == HitKind::Explosion {
         broadcast(server, Some(id), &Packet::Explode { at: center, radius: blast });
         explosion_damage(server, id, center, blast);
+        ignite_around(server, center, blast);
     }
 }
 

@@ -81,6 +81,10 @@ pub enum MenuAction {
 /// Réglage modifiable par −/+.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingKind {
+    Quality,
+    Msaa,
+    Particles,
+    Music,
     Sensitivity,
     Volume,
     Sfx,
@@ -133,6 +137,8 @@ pub struct ShowFpsSwitch;
 pub struct CrosshairSwitch;
 #[derive(Component)]
 pub struct BobSwitch;
+#[derive(Component)]
+pub struct BloomSwitch;
 #[derive(Component)]
 pub struct DesktopSwitch;
 #[derive(Component)]
@@ -640,11 +646,16 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                                 c.spawn(ui::text(&font, "SON", 13.0, ui::MUTED));
                                 setting_row(c, &font, "Volume général", SettingKind::Volume);
                                 setting_row(c, &font, "Bruitages", SettingKind::Sfx);
+                                setting_row(c, &font, "Musique", SettingKind::Music);
                             });
                             cols.spawn((ui::card(), shadow())).insert(node).with_children(|c| {
                                 c.spawn(ui::text(&font, "AFFICHAGE", 13.0, ui::MUTED));
+                                setting_row(c, &font, "Préréglage graphique", SettingKind::Quality);
                                 setting_row(c, &font, "Distance d'affichage", SettingKind::ViewDistance);
                                 setting_row(c, &font, "Qualité des ombres", SettingKind::Shadows);
+                                setting_row(c, &font, "Anticrénelage", SettingKind::Msaa);
+                                setting_row(c, &font, "Poussière et fumée", SettingKind::Particles);
+                                switch_row(c, &font, "Halo lumineux (bloom)", settings.bloom, BloomSwitch);
                                 setting_row(c, &font, "Limite d'images", SettingKind::Fps);
                                 switch_row(c, &font, "Plein écran", settings.fullscreen, FullscreenSwitch);
                                 c.spawn(ui::text(&font, "INTERFACE", 13.0, ui::MUTED));
@@ -1220,7 +1231,36 @@ pub fn actions(
             }
             MenuAction::Setting(kind, dir) => {
                 let d = dir as f32;
+                // Un réglage graphique individuel passe en « Personnalisé ».
+                if matches!(
+                    kind,
+                    SettingKind::ViewDistance | SettingKind::Shadows | SettingKind::Msaa | SettingKind::Particles
+                ) {
+                    settings.quality = 4;
+                }
                 match kind {
+                    SettingKind::Quality => {
+                        let q = (settings.quality as i32 + dir as i32).rem_euclid(5) as u8;
+                        if q < 4 {
+                            settings.apply_quality(q);
+                        } else {
+                            settings.quality = 4;
+                        }
+                    }
+                    SettingKind::Msaa => {
+                        settings.msaa = match (settings.msaa, dir > 0) {
+                            (0, true) => 2,
+                            (2, true) => 4,
+                            (4, true) => 0,
+                            (0, false) => 4,
+                            (2, false) => 0,
+                            _ => 2,
+                        }
+                    }
+                    SettingKind::Particles => {
+                        settings.particles = (settings.particles as i32 + dir as i32).rem_euclid(3) as u8
+                    }
+                    SettingKind::Music => settings.music += 0.1 * d,
                     SettingKind::Sensitivity => settings.sensitivity *= if dir > 0 { 1.15 } else { 1.0 / 1.15 },
                     SettingKind::Volume => settings.volume += 0.1 * d,
                     SettingKind::Sfx => settings.sfx += 0.1 * d,
@@ -1533,6 +1573,7 @@ pub fn settings_panel(
             Has<ShowFpsSwitch>,
             Has<CrosshairSwitch>,
             Has<BobSwitch>,
+            Has<BloomSwitch>,
         ),
         Changed<Switch>,
     >,
@@ -1541,9 +1582,17 @@ pub fn settings_panel(
     mut fog: Query<&mut DistanceFog, With<crate::player::WorldCamera>>,
     mut suns: Query<&mut DirectionalLight>,
     mut shadow_map: ResMut<bevy::light::DirectionalLightShadowMap>,
+    mut density: ResMut<crate::fx::ParticleDensity>,
+    mut cameras: Query<(Entity, &mut Msaa), With<Camera3d>>,
+    world_cam: Query<Entity, With<crate::player::WorldCamera>>,
+    mut commands: Commands,
     mut first: Local<bool>,
 ) {
-    for (s, invert, fullscreen, show_fps, crosshair, bob) in &switches {
+    for (s, invert, fullscreen, show_fps, crosshair, bob, bloom) in &switches {
+        if bloom && settings.bloom != s.on {
+            settings.bloom = s.on;
+            settings.quality = 4;
+        }
         if show_fps && settings.show_fps != s.on {
             settings.show_fps = s.on;
         }
@@ -1580,6 +1629,27 @@ pub fn settings_panel(
         }
     }
     crate::fx::set_sfx_scale(settings.sfx);
+    density.0 = settings.particles;
+    let msaa = match settings.msaa {
+        0 => Msaa::Off,
+        2 => Msaa::Sample2,
+        _ => Msaa::Sample4,
+    };
+    for (_, mut m) in &mut cameras {
+        if *m != msaa {
+            *m = msaa;
+        }
+    }
+    if let Ok(e) = world_cam.single() {
+        if settings.bloom {
+            commands.entity(e).insert(bevy::post_process::bloom::Bloom {
+                intensity: 0.12,
+                ..bevy::post_process::bloom::Bloom::NATURAL
+            });
+        } else {
+            commands.entity(e).remove::<bevy::post_process::bloom::Bloom>();
+        }
+    }
     if let Ok(mut p) = projection.single_mut() {
         if let Projection::Perspective(persp) = p.as_mut() {
             persp.fov = settings.fov.to_radians();
@@ -1606,6 +1676,13 @@ pub fn settings_panel(
             SettingKind::Sensitivity => format!("{:.0} %", settings.sensitivity / 0.0022 * 100.0),
             SettingKind::Volume => format!("{:.0} %", settings.volume * 100.0),
             SettingKind::Fov => format!("{:.0}°", settings.fov),
+            SettingKind::Quality => crate::game::QUALITY_NAMES[settings.quality.min(4) as usize].to_string(),
+            SettingKind::Msaa => match settings.msaa {
+                0 => "aucun".to_string(),
+                n => format!("{n}×"),
+            },
+            SettingKind::Particles => ["aucune", "réduites", "pleines"][settings.particles.min(2) as usize].to_string(),
+            SettingKind::Music => format!("{:.0} %", settings.music * 100.0),
             SettingKind::Sfx => format!("{:.0} %", settings.sfx * 100.0),
             SettingKind::ViewDistance => format!("{:.0} m", settings.view_distance),
             SettingKind::Shadows => ["aucune", "moyenne", "haute"][settings.shadows.min(2) as usize].to_string(),

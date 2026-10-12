@@ -477,6 +477,9 @@ pub struct GameState {
     pub teleport_to: Option<Vec3>,
     /// Nom du monde en cours (fichier de sauvegarde).
     pub world_name: String,
+    /// Chargement de la ville en cours (écran de chargement).
+    pub loading: bool,
+    pub loading_progress: f32,
 }
 
 impl Default for GameState {
@@ -499,6 +502,8 @@ impl Default for GameState {
             respawn_at: None,
             teleport_to: None,
             world_name: String::new(),
+            loading: false,
+            loading_progress: 0.0,
         };
         s.reset_inventory();
         s
@@ -517,7 +522,7 @@ impl GameState {
 
     /// En jeu et vivant : peut agir.
     pub fn alive(&self) -> bool {
-        self.phase == Phase::Playing && !self.dead
+        self.phase == Phase::Playing && !self.dead && !self.loading
     }
 
     /// Matériau actuel de l'outil de construction.
@@ -668,6 +673,37 @@ pub struct Settings {
     pub head_bob: bool,
     /// Volume des bruitages (en plus du volume général).
     pub sfx: f32,
+    /// Préréglage graphique : 0 Bas, 1 Moyen, 2 Élevé, 3 Ultra, 4 Perso.
+    pub quality: u8,
+    /// Anticrénelage : 0 aucun, 2 ou 4 échantillons.
+    pub msaa: u8,
+    /// Halo lumineux.
+    pub bloom: bool,
+    /// Poussière et fumée : 0 aucune, 1 réduite, 2 pleine.
+    pub particles: u8,
+    /// Musique (0 = coupée).
+    pub music: f32,
+}
+
+/// Noms des préréglages graphiques.
+pub const QUALITY_NAMES: [&str; 5] = ["Bas", "Moyen", "Élevé", "Ultra", "Personnalisé"];
+
+impl Settings {
+    /// Applique un préréglage (0..=3) aux réglages graphiques.
+    pub fn apply_quality(&mut self, q: u8) {
+        let (view, shadows, msaa, bloom, particles) = match q {
+            0 => (150.0, 0, 0, false, 1),
+            1 => (250.0, 1, 2, false, 1),
+            2 => (400.0, 2, 4, true, 2),
+            _ => (600.0, 2, 4, true, 2),
+        };
+        self.quality = q.min(3);
+        self.view_distance = view;
+        self.shadows = shadows;
+        self.msaa = msaa;
+        self.bloom = bloom;
+        self.particles = particles;
+    }
 }
 
 impl Default for Settings {
@@ -680,13 +716,18 @@ impl Default for Settings {
             invert_y: false,
             fullscreen: false,
             fov: 75.0,
-            view_distance: 260.0,
-            shadows: 2,
+            view_distance: 250.0,
+            shadows: 1,
             shake: 1.0,
             show_fps: false,
             crosshair: true,
             head_bob: true,
             sfx: 1.0,
+            quality: 1,
+            msaa: 2,
+            bloom: false,
+            particles: 1,
+            music: 0.5,
         }
     }
 }
@@ -713,6 +754,12 @@ impl Settings {
         self.shadows = self.shadows.min(2);
         self.shake = self.shake.clamp(0.0, 1.0);
         self.sfx = self.sfx.clamp(0.0, 1.0);
+        self.music = self.music.clamp(0.0, 1.0);
+        self.quality = self.quality.min(4);
+        self.particles = self.particles.min(2);
+        if !matches!(self.msaa, 0 | 2 | 4) {
+            self.msaa = 4;
+        }
         self.name = self.name.chars().filter(|c| !c.is_control()).take(16).collect();
         if self.name.trim().is_empty() {
             self.name = default_name();
@@ -754,6 +801,11 @@ show_fps={}
 crosshair={}
 head_bob={}
 sfx={}
+quality={}
+msaa={}
+bloom={}
+particles={}
+music={}
 ",
         s.name,
         s.sensitivity,
@@ -768,7 +820,12 @@ sfx={}
         s.show_fps,
         s.crosshair,
         s.head_bob,
-        s.sfx
+        s.sfx,
+        s.quality,
+        s.msaa,
+        s.bloom,
+        s.particles,
+        s.music
     );
     let _ = std::fs::write(dir.join("settings.txt"), body);
 }
@@ -800,6 +857,11 @@ pub fn load_settings() -> Settings {
             "crosshair" => s.crosshair = v == "true",
             "head_bob" => s.head_bob = v == "true",
             "sfx" => s.sfx = v.parse().unwrap_or(s.sfx),
+            "quality" => s.quality = v.parse().unwrap_or(s.quality),
+            "msaa" => s.msaa = v.parse().unwrap_or(s.msaa),
+            "bloom" => s.bloom = v == "true",
+            "particles" => s.particles = v.parse().unwrap_or(s.particles),
+            "music" => s.music = v.parse().unwrap_or(s.music),
             _ => {}
         }
     }

@@ -13,7 +13,7 @@ use crate::world::VoxelWorld;
 
 /// Version du générateur : une sauvegarde d'une autre version est refusée
 /// (rejouer son historique sur une autre ville n'aurait aucun sens).
-pub const MAP_VERSION: u32 = 2;
+pub const MAP_VERSION: u32 = 3;
 
 /// Espacement des rues, en cellules.
 const BLOCK: i32 = 64;
@@ -292,6 +292,31 @@ fn building(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3, s: &St
         y += s.storey;
     }
 
+    // Piliers porteurs : une trame tous les 12 voxels environ, du sol au
+    // toit. Sans eux, les grands planchers ne tiendraient pas (voir
+    // `VoxelWorld::collapse_components`).
+    let inner_w = max.x - min.x - 2 * WALL;
+    let inner_d = max.z - min.z - 2 * WALL;
+    if inner_w >= 18 && inner_d >= 18 {
+        let nx = (inner_w / 12).max(1);
+        let nz = (inner_d / 12).max(1);
+        for ix in 1..=nx {
+            for iz in 1..=nz {
+                let x = min.x + WALL + inner_w * ix / (nx + 1);
+                let z = min.z + WALL + inner_d * iz / (nz + 1);
+                // Pas dans l'escalier (mur nord) ni sur la porte.
+                if s.stairs && z < min.z + WALL + 9 {
+                    continue;
+                }
+                w.fill(
+                    IVec3::new(x, min.y, z),
+                    IVec3::new(x + 2, max.y - 1, z + 2),
+                    CONCRETE,
+                );
+            }
+        }
+    }
+
     // Toit avec un petit rebord.
     w.fill(
         IVec3::new(min.x, max.y - 1, min.z),
@@ -450,6 +475,11 @@ fn furnish(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3, base: i
         let x = rng.range(x0, x1 - 6);
         let z = rng.range(z0, z1 - 6);
         let at = IVec3::new(x, base, z);
+        // Le mobilier repose sur un sol plein (pas au-dessus d'une trémie).
+        let floor = |dx: i32, dz: i32| w.is_solid(at + IVec3::new(dx, -1, dz));
+        if !(floor(0, 0) && floor(5, 0) && floor(0, 5) && floor(5, 5) && floor(2, 2)) {
+            continue;
+        }
         match rng.range(0, 5) {
             // Table 4×2 avec quatre chaises.
             0 | 1 => {
@@ -458,15 +488,15 @@ fn furnish(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3, base: i
                 }
                 let top = at + IVec3::new(1, 0, 2);
                 for (dx, dz) in [(0, 0), (3, 0), (0, 1), (3, 1)] {
-                    w.set(top + IVec3::new(dx, 0, dz), true, WOOD);
+                    w.set(top + IVec3::new(dx, 0, dz), true, FURN_WOOD);
                 }
-                w.fill(top + IVec3::new(0, 1, 0), top + IVec3::new(4, 2, 2), WOOD);
+                w.fill(top + IVec3::new(0, 1, 0), top + IVec3::new(4, 2, 2), FURN_WOOD);
                 // Chaises : assise, dossier à l'opposé de la table.
                 for (dx, dz, back) in [(1, -1, -1), (2, -1, -1), (1, 2, 1), (2, 2, 1)] {
                     let c = top + IVec3::new(dx, 0, dz);
                     w.set(c, true, BLUE);
                     for h in 0..3 {
-                        w.set(c + IVec3::new(0, h, back), true, WOOD);
+                        w.set(c + IVec3::new(0, h, back), true, FURN_WOOD);
                     }
                 }
             }
@@ -475,13 +505,14 @@ fn furnish(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3, base: i
                 if !free(w, at, at + IVec3::new(6, 5, 5)) {
                     continue;
                 }
-                w.fill(at + IVec3::new(0, 0, 0), at + IVec3::new(1, 1, 2), METAL);
-                w.fill(at + IVec3::new(4, 0, 0), at + IVec3::new(5, 1, 2), METAL);
-                w.fill(at + IVec3::new(0, 1, 0), at + IVec3::new(5, 2, 2), WOOD);
+                w.fill(at + IVec3::new(0, 0, 0), at + IVec3::new(1, 1, 2), FURN_METAL);
+                w.fill(at + IVec3::new(4, 0, 0), at + IVec3::new(5, 1, 2), FURN_METAL);
+                w.fill(at + IVec3::new(0, 1, 0), at + IVec3::new(5, 2, 2), FURN_WOOD);
                 w.fill(at + IVec3::new(2, 2, 0), at + IVec3::new(4, 4, 1), BLACK);
                 w.set(at + IVec3::new(2, 0, 3), true, BLUE);
-                w.set(at + IVec3::new(2, 1, 3), true, BLUE);
-                w.set(at + IVec3::new(2, 2, 4), true, BLUE);
+                for h in 0..3 {
+                    w.set(at + IVec3::new(2, h, 4), true, BLUE);
+                }
             }
             // Canapé.
             3 => {
@@ -498,7 +529,7 @@ fn furnish(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3, base: i
                 if !free(w, at, at + IVec3::new(6, 6, 2)) {
                     continue;
                 }
-                w.fill(at, at + IVec3::new(5, 5, 1), WOOD);
+                w.fill(at, at + IVec3::new(5, 5, 1), FURN_WOOD);
                 for shelf in [1, 3] {
                     w.empty(at + IVec3::new(1, shelf, 0), at + IVec3::new(4, shelf + 1, 1));
                     if rng.chance(0.7) {
@@ -511,7 +542,7 @@ fn furnish(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3, base: i
                 if !free(w, at, at + IVec3::new(1, 6, 1)) {
                     continue;
                 }
-                w.fill(at, at + IVec3::new(1, 4, 1), METAL);
+                w.fill(at, at + IVec3::new(1, 4, 1), FURN_METAL);
                 w.fill(at + IVec3::new(0, 4, 0), at + IVec3::new(1, 6, 1), LAMP);
             }
         }
@@ -548,7 +579,7 @@ fn street_props(w: &mut VoxelWorld, rng: &mut MapRng) {
                             1 if rng.chance(0.5) => bench(w, at, along_z),
                             2 if rng.chance(0.5) => {
                                 w.fill(at, at + IVec3::new(1, 2, 1), RED);
-                                w.set(at + IVec3::new(0, 2, 0), true, METAL);
+                                w.set(at + IVec3::new(0, 2, 0), true, FURN_METAL);
                             }
                             3 if rng.chance(0.4) => {
                                 w.fill(at, at + IVec3::new(2, 2, 2), BLACK);
@@ -566,7 +597,7 @@ fn street_props(w: &mut VoxelWorld, rng: &mut MapRng) {
             let (cx, cz) = (c, cz);
             for (sx, sz) in [(-1, -1), (1, 1)] {
                 let p = IVec3::new(cx + sx * (ROAD + 1), y0, cz + sz * (ROAD + 1));
-                w.fill(p, p + IVec3::new(1, 11, 1), METAL);
+                w.fill(p, p + IVec3::new(1, 11, 1), FURN_METAL);
                 w.fill(p + IVec3::new(0, 8, 0), p + IVec3::new(1, 11, 1), BLACK);
                 w.set(p + IVec3::new(0, 9, 0), true, LAMP);
             }
@@ -579,9 +610,9 @@ fn lamp_post(w: &mut VoxelWorld, at: IVec3, toward: IVec3) {
     if !free(w, at, at + IVec3::new(1, 13, 1)) {
         return;
     }
-    w.fill(at, at + IVec3::new(1, 12, 1), METAL);
+    w.fill(at, at + IVec3::new(1, 12, 1), FURN_METAL);
     for i in 1..=3 {
-        w.set(at + IVec3::new(0, 11, 0) + toward * i, true, METAL);
+        w.set(at + IVec3::new(0, 11, 0) + toward * i, true, FURN_METAL);
     }
     w.set(at + IVec3::new(0, 10, 0) + toward * 3, true, LAMP);
     w.set(at + IVec3::new(0, 10, 0) + toward * 2, true, LAMP);
@@ -593,10 +624,10 @@ fn bench(w: &mut VoxelWorld, at: IVec3, along_z: bool) {
     if !free(w, at, at + axis * 4 + IVec3::new(1, 3, 1)) {
         return;
     }
-    w.set(at, true, METAL);
-    w.set(at + axis * 3, true, METAL);
+    w.set(at, true, FURN_METAL);
+    w.set(at + axis * 3, true, FURN_METAL);
     for i in 0..4 {
-        w.set(at + axis * i + IVec3::new(0, 1, 0), true, WOOD);
+        w.set(at + axis * i + IVec3::new(0, 1, 0), true, FURN_WOOD);
     }
 }
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.4.0
+
+- **Physique structurelle** : stabilité par chemin de support (portée selon le matériau),
+  piliers porteurs dans les bâtiments, mobilier indépendant de la structure. Les planchers,
+  façades et porte-à-faux trop longs tombent.
+- **Feu** : combustion et propagation (bois, feuillage, tissu), flammes visibles, brûlures.
+- **Poussière et fumée** à chaque écroulement, impact et explosion.
+- **Préréglages graphiques** Bas / Moyen / Élevé / Ultra / Personnalisé, avec anticrénelage,
+  particules et bloom réglables.
+- **Son** : effets normalisés, portée spatiale plus longue, nouveaux sons (grondement,
+  impact lourd, crépitement, pose de bloc). **Musique** générative et dossier `music`.
+- **Écran de chargement** : la ville est générée en arrière-plan, le jeu démarre quand le
+  terrain proche est prêt (plus de saccades à l'arrivée).
+- **Mémoire** : maillages compacts (24 octets par sommet, sans copie CPU), chargés selon la
+  distance d'affichage, matériaux des morceaux en palette 4 bits. ~1,1 Go au lieu de ~2,8 Go.
+- Journal du serveur à l'heure de la machine (plus d'UTC).
+
 ## 1.3.0
 
 - **Physique** : un bâtiment dont la base est détruite tombe en bloc. L'ensemble détaché devient

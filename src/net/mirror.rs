@@ -42,6 +42,8 @@ pub struct Mirror {
     blocks: HashMap<u32, Entity>,
     bodies: HashMap<u32, Entity>,
     partial: HashMap<u32, Partial>,
+    /// Flammes affichées, par voxel.
+    pub fires: HashMap<IVec3, Entity>,
 }
 
 impl Mirror {
@@ -53,6 +55,13 @@ impl Mirror {
             commands.entity(e).despawn();
         }
         self.partial.clear();
+        for (_, e) in self.fires.drain() {
+            commands.entity(e).despawn();
+        }
+    }
+
+    pub fn body_entity(&self, id: u32) -> Option<Entity> {
+        self.bodies.get(&id).copied()
     }
 
     pub fn add_blocks(&mut self, commands: &mut Commands, assets: &VoxelAssets, list: &[BlockInfo]) {

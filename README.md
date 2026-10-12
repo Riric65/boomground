@@ -32,11 +32,19 @@ Détails : [Installation](#installation).
 - **Portes** qui s'ouvrent et se ferment (`F`), et que l'on peut aussi démolir.
 - **Construction** : l'outil *Blocs* pose des blocs de bois, brique, béton, métal, verre,
   plâtre, tuile, noir ou lumière.
-- **Physique** : un bâtiment dont la base est détruite **tombe en un seul bloc** : l'ensemble
-  détaché devient un corps rigide (masse selon les matériaux, centre de masse, inertie) qui
-  chute à 9,81 m/s², bascule, heurte le monde et se casse à l'impact, puis se fige. Les
-  gravats ont une masse (le métal et le béton pèsent plus que le bois). Les corps lourds
-  écrasent les joueurs.
+- **Physique** : chaque voxel doit être relié au sol par un chemin qui tient. Un pilier porte
+  tout, mais à l'horizontale la portée dépend du matériau (béton ≈ 5 m, bois ≈ 5 m, brique
+  ≈ 4 m, verre ≈ 2 m). Un plancher sans pilier, une façade au-dessus d'un grand trou, un
+  porte-à-faux trop long : **tombent**. L'ensemble détaché devient un corps rigide (masse,
+  centre de masse, inertie, 9,81 m/s²) qui bascule, heurte le monde, se casse à l'impact et
+  se fige. Le mobilier ne fait pas partie du bâtiment : il tombe de son côté.
+- **Feu** : le bois, le feuillage et le tissu brûlent. Les explosions les enflamment, le feu
+  se propage (plus vite vers le haut), consume les voxels (ce qu'ils portaient peut tomber)
+  et brûle les joueurs proches.
+- **Poussière et fumée** : nuages à chaque écroulement, impact et explosion.
+- **Son et musique** : sons normalisés et spatialisés à plus longue portée ; trois ambiances
+  musicales composées par le jeu (aucun fichier, aucune licence). Dépose tes propres `.wav` ou
+  `.ogg` dans le dossier `music` des réglages pour les utiliser à la place.
 - **Mort** : 100 points de vie (explosions, balles, chutes, écrasement). À 0, le personnage
   devient un ragdoll, la caméra passe à la troisième personne, puis tu réapparais.
 - **Mondes sauvegardables** : un fichier `.bgw` contient **tout** (ville modifiée, gravats,
@@ -96,8 +104,9 @@ Les explosions s'enchaînent : une bombe prise dans un souffle explose à son to
 ## Réglages
 
 Menu → Paramètres : sensibilité, champ de vision, secousses de caméra, inversion de l'axe Y,
-balancement à la marche, volume général et bruitages, distance d'affichage, qualité des
-ombres, limite d'images, plein écran, compteur de FPS, viseur. Ils sont enregistrés dans
+balancement à la marche, volumes (général, bruitages, musique), **préréglage graphique**
+(Bas, Moyen, Élevé, Ultra, Personnalisé) et ses réglages (distance d'affichage, ombres,
+anticrénelage, particules, bloom), limite d'images, plein écran, compteur de FPS, viseur. Ils sont enregistrés dans
 `%APPDATA%\BoomGround` (Windows) ou `~/.config/boomground` (Linux).
 
 ## Multijoueur

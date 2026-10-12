@@ -249,7 +249,7 @@ pub fn move_player(
         return;
     };
     let dt = time.delta_secs().min(0.05);
-    if game.dead {
+    if game.dead || game.loading {
         return;
     }
 

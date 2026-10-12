@@ -40,17 +40,77 @@ pub struct RayHit {
 /// Cellules par morceau de stockage : `MESH_CHUNK`³.
 const CHUNK_CELLS: usize = (MESH_CHUNK * MESH_CHUNK * MESH_CHUNK) as usize;
 
+/// Matériaux d'un morceau : palette de 16 entrées max et 4 bits par
+/// cellule (2 Ko au lieu de 4 Ko), avec repli sur 8 bits si un morceau
+/// mélange plus de 16 matériaux.
+enum MatStore {
+    Narrow { pal: [u8; 16], len: u8, idx: Box<[u8; CHUNK_CELLS / 2]> },
+    Wide(Box<[u8; CHUNK_CELLS]>),
+}
+
+impl MatStore {
+    #[inline]
+    fn get(&self, i: usize) -> u8 {
+        match self {
+            MatStore::Narrow { pal, idx, .. } => {
+                let b = idx[i >> 1];
+                pal[(if i & 1 == 0 { b & 15 } else { b >> 4 }) as usize]
+            }
+            MatStore::Wide(w) => w[i],
+        }
+    }
+
+    fn set(&mut self, i: usize, m: u8) {
+        match self {
+            MatStore::Narrow { pal, len, idx } => {
+                let found = pal[..*len as usize].iter().position(|&p| p == m);
+                let slot = match found {
+                    Some(k) => k as u8,
+                    None if *len < 16 => {
+                        pal[*len as usize] = m;
+                        *len += 1;
+                        *len - 1
+                    }
+                    None => {
+                        // Palette pleine : on passe en 8 bits.
+                        let mut wide = Box::new([0u8; CHUNK_CELLS]);
+                        for (c, cell) in wide.iter_mut().enumerate() {
+                            let b = idx[c >> 1];
+                            *cell = pal[(if c & 1 == 0 { b & 15 } else { b >> 4 }) as usize];
+                        }
+                        wide[i] = m;
+                        *self = MatStore::Wide(wide);
+                        return;
+                    }
+                };
+                let b = &mut idx[i >> 1];
+                if i & 1 == 0 {
+                    *b = (*b & 0xF0) | slot;
+                } else {
+                    *b = (*b & 0x0F) | (slot << 4);
+                }
+            }
+            MatStore::Wide(w) => w[i] = m,
+        }
+    }
+}
+
 /// Un morceau de stockage (alloué seulement s'il contient du solide).
 struct Chunk {
     solid: [u64; CHUNK_CELLS / 64],
-    mat: [u8; CHUNK_CELLS],
+    mat: MatStore,
 }
 
 impl Chunk {
     fn new() -> Box<Self> {
         Box::new(Self {
             solid: [0; CHUNK_CELLS / 64],
-            mat: [0; CHUNK_CELLS],
+            // Entrée 0 = matériau 0 : un morceau neuf lit 0 partout.
+            mat: MatStore::Narrow {
+                pal: [0; 16],
+                len: 1,
+                idx: Box::new([0; CHUNK_CELLS / 2]),
+            },
         })
     }
 }
@@ -196,7 +256,7 @@ impl VoxelWorld {
     #[inline]
     pub fn material(&self, c: IVec3) -> u8 {
         match self.locate(c) {
-            Some((k, i)) => self.chunks[k].as_ref().map_or(0, |ch| ch.mat[i]),
+            Some((k, i)) => self.chunks[k].as_ref().map_or(0, |ch| ch.mat.get(i)),
             None => 0,
         }
     }
@@ -211,7 +271,7 @@ impl VoxelWorld {
                 ch.solid[i >> 6] |= bit;
                 self.alive += 1;
             }
-            ch.mat[i] = material;
+            ch.mat.set(i, material);
         } else {
             let Some(ch) = self.chunks[k].as_mut() else { return };
             if ch.solid[i >> 6] & bit == 0 {
@@ -289,74 +349,151 @@ impl VoxelWorld {
     }
 
     /// Intégrité structurelle : après une destruction, retire du monde les
-    /// ensembles de voxels qui ne tiennent plus au sol et les renvoie, un
-    /// `Vec` par ensemble (ils deviennent des corps rigides, voir `sim`).
-    /// `destroyed` : cellules qui viennent d'être détruites.
+    /// voxels qui ne tiennent plus et les renvoie, un `Vec` par ensemble
+    /// (ils deviennent des corps rigides, voir `sim`). Le mobilier
+    /// (`is_prop`) forme ses propres ensembles.
     ///
-    /// Recherche « meilleur d'abord » vers le bas depuis chaque voisin
-    /// plein : un ensemble relié au sol est trouvé en quelques pas ; un
-    /// ensemble flottant est exploré en entier. Seuls les ensembles
-    /// démesurés (> `MAX_BODY_VOXELS`) sont réputés stables.
+    /// Modèle : chaque voxel doit être relié au sol par un chemin dont le
+    /// coût reste sous [`STABILITY`]. Monter depuis un appui coûte presque
+    /// rien (un pilier porte tout), avancer à l'horizontale coûte selon le
+    /// matériau (béton ≈ 5 m de portée, brique ≈ 3,5 m, bois et verre
+    /// moins), être suspendu coûte cher. Un plancher sans pilier ni mur
+    /// proche, une façade au-dessus d'un grand trou, un porte-à-faux trop
+    /// long : tombent. Calcul local, autour de `destroyed`.
     pub fn collapse_components(&mut self, destroyed: &[IVec3]) -> Vec<Vec<IVec3>> {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
-        const MAX_SEEDS: usize = 6_000;
-        const OFFSETS: [IVec3; 6] = [
-            IVec3::X,
-            IVec3::NEG_X,
-            IVec3::Y,
-            IVec3::NEG_Y,
-            IVec3::Z,
-            IVec3::NEG_Z,
-        ];
+        if destroyed.is_empty() {
+            return Vec::new();
+        }
         let ground = crate::map::GROUND;
-        let limit = crate::sim::MAX_BODY_VOXELS;
+        let mut lo = destroyed[0];
+        let mut hi = destroyed[0];
+        for &c in destroyed {
+            lo = lo.min(c);
+            hi = hi.max(c);
+        }
+        // Marge : plus que la plus longue portée possible.
+        const MARGIN: i32 = 24;
+        // Jusqu'au sol : c'est lui qui porte tout.
+        let r0 = IVec3::new((lo.x - MARGIN).max(0), (ground - 1).min(lo.y).max(0), (lo.z - MARGIN).max(0));
+        let r1 = IVec3::new(
+            (hi.x + MARGIN + 1).min(self.dims.x),
+            self.dims.y,
+            (hi.z + MARGIN + 1).min(self.dims.z),
+        );
+        let size = r1 - r0;
+        if size.x <= 0 || size.y <= 0 || size.z <= 0 {
+            return Vec::new();
+        }
+        let total = (size.x * size.y * size.z) as usize;
+        if total > 6_000_000 {
+            return Vec::new();
+        }
+        let index = |c: IVec3| -> usize {
+            (((c.x - r0.x) * size.y + (c.y - r0.y)) * size.z + (c.z - r0.z)) as usize
+        };
+        let inside = |c: IVec3| c.cmpge(r0).all() && c.cmplt(r1).all();
 
-        let mut seeds: Vec<IVec3> = Vec::new();
-        let mut seen_seed: HashSet<IVec3> = HashSet::new();
-        'outer: for &c in destroyed {
-            for o in OFFSETS {
-                let n = c + o;
-                if self.is_solid(n) && seen_seed.insert(n) {
-                    seeds.push(n);
-                    if seeds.len() >= MAX_SEEDS {
-                        break 'outer;
+        // Voxels de la région, sources (sol, bords) et matériaux.
+        const INF: u32 = u32::MAX;
+        let mut dist: Vec<u32> = vec![INF; total];
+        let mut solid: Vec<bool> = vec![false; total];
+        let mut heap: BinaryHeap<Reverse<(u32, i32, i32, i32)>> = BinaryHeap::new();
+        let mut cells: Vec<IVec3> = Vec::new();
+        for x in r0.x..r1.x {
+            for z in r0.z..r1.z {
+                let edge_xz = x == r0.x || x == r1.x - 1 || z == r0.z || z == r1.z - 1;
+                for y in r0.y..r1.y {
+                    let c = IVec3::new(x, y, z);
+                    if !self.is_solid(c) {
+                        continue;
+                    }
+                    let i = index(c);
+                    solid[i] = true;
+                    cells.push(c);
+                    let edge_top = y == r1.y - 1;
+                    if y < ground || edge_xz || edge_top {
+                        dist[i] = 0;
+                        heap.push(Reverse((0, x, y, z)));
                     }
                 }
             }
         }
-
-        let mut anchored: HashSet<IVec3> = HashSet::new();
-        let mut out: Vec<Vec<IVec3>> = Vec::new();
-        for seed in seeds {
-            if anchored.contains(&seed) || !self.is_solid(seed) {
+        const NEIGHBORS: [IVec3; 6] = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+        while let Some(Reverse((d, x, y, z))) = heap.pop() {
+            let u = IVec3::new(x, y, z);
+            if d > dist[index(u)] {
                 continue;
             }
-            let mut visited: HashSet<IVec3> = HashSet::new();
-            let mut heap = BinaryHeap::new();
-            visited.insert(seed);
-            heap.push(Reverse((seed.y, seed.x, seed.z)));
-            let mut stable = false;
-            while let Some(Reverse((y, x, z))) = heap.pop() {
-                if y < ground || visited.len() > limit {
-                    stable = true;
-                    break;
+            let u_prop = is_prop(self.material(u));
+            for o in NEIGHBORS {
+                let n = u + o;
+                if !inside(n) {
+                    continue;
                 }
-                let c = IVec3::new(x, y, z);
-                for o in OFFSETS {
-                    let n = c + o;
-                    if self.is_solid(n) && visited.insert(n) {
-                        heap.push(Reverse((n.y, n.x, n.z)));
+                let ni = index(n);
+                if !solid[ni] {
+                    continue;
+                }
+                let m = self.material(n);
+                // Une structure ne s'appuie pas sur du mobilier.
+                if u_prop && !is_prop(m) {
+                    continue;
+                }
+                let step = if o.y > 0 {
+                    // n est au-dessus de u : posé dessus.
+                    1
+                } else if o.y < 0 {
+                    // n est sous u : suspendu à u.
+                    28
+                } else {
+                    span_cost(m) * 10
+                };
+                // Les coûts sont en dixièmes : 1 = 0,1 par voxel porté.
+                let nd = d + step;
+                if nd < STABILITY * 10 && nd < dist[ni] {
+                    dist[ni] = nd;
+                    heap.push(Reverse((nd, n.x, n.y, n.z)));
+                }
+            }
+        }
+
+        // Instables : pleins mais jamais atteints.
+        let mut unstable: Vec<IVec3> = Vec::new();
+        for &c in &cells {
+            if dist[index(c)] == INF {
+                unstable.push(c);
+            }
+        }
+        if unstable.is_empty() {
+            return Vec::new();
+        }
+        let mut in_set: HashSet<IVec3> = unstable.iter().copied().collect();
+        // Ensembles connexes de même classe (structure / mobilier).
+        let mut out: Vec<Vec<IVec3>> = Vec::new();
+        for &seed in &unstable {
+            if !in_set.remove(&seed) {
+                continue;
+            }
+            let class = is_prop(self.material(seed));
+            let mut comp = vec![seed];
+            let mut stack = vec![seed];
+            while let Some(cur) = stack.pop() {
+                for o in NEIGHBORS {
+                    let n = cur + o;
+                    if in_set.contains(&n) && is_prop(self.material(n)) == class {
+                        in_set.remove(&n);
+                        comp.push(n);
+                        stack.push(n);
                     }
                 }
             }
-            if stable {
-                anchored.extend(visited);
-            } else {
-                for &c in &visited {
-                    self.set(c, false, 0);
-                }
-                out.push(visited.into_iter().collect());
+            out.push(comp);
+        }
+        for comp in &out {
+            for &c in comp {
+                self.set(c, false, 0);
             }
         }
         out
@@ -365,6 +502,21 @@ impl VoxelWorld {
     /// Variante à plat : toutes les cellules retirées.
     pub fn collapse(&mut self, destroyed: &[IVec3]) -> Vec<IVec3> {
         self.collapse_components(destroyed).into_iter().flatten().collect()
+    }
+
+    /// Nombre de morceaux par axe.
+    pub fn chunk_grid(&self) -> IVec3 {
+        self.chunk_dims
+    }
+
+    /// Le morceau contient-il (ou a-t-il contenu) du solide ?
+    #[inline]
+    pub fn chunk_allocated(&self, k: IVec3) -> bool {
+        let d = self.chunk_dims;
+        if k.x < 0 || k.y < 0 || k.z < 0 || k.x >= d.x || k.y >= d.y || k.z >= d.z {
+            return false;
+        }
+        self.chunks[((k.x * d.y + k.y) * d.z + k.z) as usize].is_some()
     }
 
     /// Clefs des morceaux qui contiennent (ou ont contenu) du solide.
@@ -740,7 +892,7 @@ pub struct VoxelAssets {
 }
 
 /// Palette (sRGB) : couleur par identifiant de matériau.
-pub const PALETTE: [(f32, f32, f32); 20] = [
+pub const PALETTE: [(f32, f32, f32); 22] = [
     (0.58, 0.58, 0.55), // 0 béton
     (0.36, 0.36, 0.35), // 1 béton sombre
     (0.17, 0.17, 0.18), // 2 asphalte
@@ -761,6 +913,8 @@ pub const PALETTE: [(f32, f32, f32); 20] = [
     (0.62, 0.12, 0.10), // 17 rouge (bouches d'incendie, sièges)
     (0.22, 0.32, 0.58), // 18 bleu (canapés, bennes)
     (0.07, 0.07, 0.08), // 19 noir (pneus, écrans)
+    (0.72, 0.52, 0.30), // 20 bois de mobilier
+    (0.34, 0.36, 0.40), // 21 métal de mobilier
 ];
 
 /// Couleur linéaire d'un matériau : les couleurs de sommets sont lues en
@@ -795,10 +949,60 @@ pub mod mat {
     pub const RED: u8 = 17;
     pub const BLUE: u8 = 18;
     pub const BLACK: u8 = 19;
+    /// Mobilier : n'appartient pas à la structure d'un bâtiment.
+    pub const FURN_WOOD: u8 = 20;
+    pub const FURN_METAL: u8 = 21;
 
     /// Matériaux proposés par l'outil de construction.
     pub const BUILD: [u8; 9] = [WOOD, BRICK, CONCRETE, METAL, GLASS, PLASTER, ROOF, BLACK, LAMP];
 }
+
+/// Les « éléments » (mobilier, lampes, bouches d'incendie…) ne font pas
+/// partie de la structure : ils reposent sur elle et tombent seuls.
+pub fn is_prop(material: u8) -> bool {
+    use mat::*;
+    matches!(material, BLUE | RED | BLACK | LAMP | FURN_WOOD | FURN_METAL)
+}
+
+/// Le matériau brûle-t-il ? (bois, feuillage, tissu)
+pub fn flammable(material: u8) -> bool {
+    use mat::*;
+    matches!(material, WOOD | FURN_WOOD | LEAVES | BLUE)
+}
+
+/// Durée de combustion d'un voxel (secondes).
+pub fn burn_time(material: u8) -> f32 {
+    use mat::*;
+    match material {
+        LEAVES => 3.5,
+        BLUE => 4.5,
+        FURN_WOOD => 6.0,
+        _ => 8.0,
+    }
+}
+
+/// Résistance horizontale d'un matériau : « coût » d'un voxel porté en
+/// porte-à-faux (plus il est faible, plus la portée sans appui est longue).
+/// La structure tient tant que chaque voxel est relié au sol par un chemin
+/// de coût total inférieur à [`STABILITY`].
+fn span_cost(material: u8) -> u32 {
+    use mat::*;
+    match material {
+        METAL | FURN_METAL => 3,
+        CONCRETE | CONCRETE_DARK => 4,
+        ROOF => 5,
+        BRICK | BRICK_DARK => 5,
+        MORTAR | PLASTER => 5,
+        WOOD | FURN_WOOD => 4,
+        LEAVES => 9,
+        GLASS => 12,
+        BLUE | RED | BLACK | LAMP => 10,
+        _ => 1,
+    }
+}
+
+/// Budget de stabilité d'un voxel (en dixièmes de coût).
+pub const STABILITY: u32 = 48;
 
 /// Masse volumique relative d'un matériau (sert au poids des gravats).
 pub fn density(material: u8) -> f32 {
@@ -809,7 +1013,8 @@ pub fn density(material: u8) -> f32 {
         BRICK | BRICK_DARK | ROOF => 2.0,
         GLASS => 1.6,
         DIRT | ASPHALT => 1.8,
-        WOOD | LEAVES | RED | BLUE => 0.7,
+        WOOD | LEAVES | RED | BLUE | FURN_WOOD => 0.7,
+        FURN_METAL => 2.5,
         _ => 1.0,
     }
 }
@@ -838,8 +1043,8 @@ pub fn material_value(material: u8) -> u32 {
     match material {
         BRICK | BRICK_DARK | GLASS | ROOF => 2,
         LAMP => 3,
-        METAL => 3,
-        CONCRETE | CONCRETE_DARK | MORTAR | WOOD | PLASTER => 1,
+        METAL | FURN_METAL => 3,
+        CONCRETE | CONCRETE_DARK | MORTAR | WOOD | PLASTER | FURN_WOOD => 1,
         _ => 0,
     }
 }
@@ -953,6 +1158,8 @@ pub fn setup_voxel_assets(
         voxel_material: materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(images.add(voxel_texture())),
+            // Les UV du maillage sont divisés par `UV_SCALE`.
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(crate::vmesh::UV_SCALE)),
             perceptual_roughness: 0.9,
             ..default()
         }),
@@ -1151,5 +1358,108 @@ mod tests {
         let mut c = VoxelWorld::new();
         c.rebuild(98765);
         assert_ne!(a.alive, c.alive);
+    }
+}
+
+#[cfg(test)]
+mod structure_tests {
+    use super::*;
+
+    /// Une ville intacte doit être stable : aucun voxel « instable » dans
+    /// des zones prises au hasard (sinon les bâtiments s'écrouleraient au
+    /// premier coup).
+    #[test]
+    fn untouched_city_is_stable() {
+        let mut w = VoxelWorld::new();
+        w.rebuild(31415);
+        let g = crate::map::GROUND;
+        let mut checked = 0;
+        for (bx, bz) in [(3, 3), (7, 5), (12, 9), (16, 16), (20, 11), (25, 27), (8, 22), (14, 4)] {
+            // Centre d'un pâté de maisons.
+            let c = IVec3::new(bx * 64 + 32, g + 8, bz * 64 + 32);
+            let found = w.collapse_components(&[c]);
+            let n: usize = found.iter().map(|v| v.len()).sum();
+            assert!(n <= 200, "pâté ({bx},{bz}) : {n} voxels instables dans une ville intacte");
+            checked += 1;
+        }
+        assert_eq!(checked, 8);
+    }
+
+    #[test]
+    fn wide_hole_makes_the_facade_above_fall_but_small_hole_does_not() {
+        let mut w = VoxelWorld::new();
+        let g = crate::map::GROUND;
+        // Sol + un mur de béton de 60 × 20 voxels, 2 d'épaisseur.
+        w.fill(IVec3::new(0, 1, 0), IVec3::new(200, g, 200), mat::DIRT);
+        w.fill(IVec3::new(50, g, 50), IVec3::new(110, g + 20, 52), mat::CONCRETE);
+        // Petit trou (6 voxels de large) : le linteau tient.
+        let mut small = Vec::new();
+        for x in 78..84 {
+            for y in g..g + 6 {
+                for z in 50..52 {
+                    w.set(IVec3::new(x, y, z), false, 0);
+                    small.push(IVec3::new(x, y, z));
+                }
+            }
+        }
+        assert!(w.collapse_components(&small).is_empty());
+        // Grand trou (40 voxels) : le mur au-dessus tombe.
+        let mut big = Vec::new();
+        for x in 60..100 {
+            for y in g..g + 6 {
+                for z in 50..52 {
+                    if w.is_solid(IVec3::new(x, y, z)) {
+                        w.set(IVec3::new(x, y, z), false, 0);
+                        big.push(IVec3::new(x, y, z));
+                    }
+                }
+            }
+        }
+        let fallen: usize = w.collapse_components(&big).iter().map(|v| v.len()).sum();
+        assert!(fallen > 100, "{fallen} voxels tombés");
+    }
+}
+
+#[cfg(test)]
+mod structure_probe {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn probe_unstable() {
+        let mut w = VoxelWorld::new();
+        w.rebuild(31415);
+        let g = crate::map::GROUND;
+        for (bx, bz) in [(3, 3), (7, 5), (12, 9), (16, 16), (8, 22), (25, 27)] {
+            let c = IVec3::new(bx * 64 + 32, g + 8, bz * 64 + 32);
+            let found = w.collapse_components(&[c]);
+            let mut by_mat = std::collections::BTreeMap::new();
+            let mut lo = IVec3::splat(i32::MAX);
+            let mut hi = IVec3::splat(i32::MIN);
+            for comp in &found {
+                for &cell in comp {
+                    *by_mat.entry(w.material(cell)).or_insert(0) += 1;
+                    lo = lo.min(cell);
+                    hi = hi.max(cell);
+                }
+            }
+            println!("pâté ({bx},{bz}) : {} ensembles, matériaux {by_mat:?}, boîte {lo:?}..{hi:?}", found.len());
+            let mut by_y = std::collections::BTreeMap::new();
+            for comp in &found {
+                for &cell in comp {
+                    *by_y.entry(cell.y).or_insert(0) += 1;
+                }
+            }
+            println!("  par y : {by_y:?}");
+            if let Some(comp) = found.first() {
+                let c0 = comp[0];
+                let col: Vec<String> = (c0.y - 4..c0.y + 3)
+                    .map(|y| format!("y{}={}", y, if w.is_solid(IVec3::new(c0.x, y, c0.z)) { w.material(IVec3::new(c0.x, y, c0.z)) as i32 } else { -1 }))
+                    .collect();
+                println!("  colonne sous l'exemple : {col:?}");
+                let sample: Vec<_> = comp.iter().take(6).collect();
+                println!("  exemple : {sample:?}");
+            }
+        }
     }
 }

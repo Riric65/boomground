@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use bevy::light::NotShadowCaster;
-use bevy::mesh::Indices;
+use bevy::mesh::{Indices, MeshVertexAttribute, VertexAttributeValues, VertexFormat};
 use bevy::prelude::*;
 
 use crate::world::{mat, palette_linear, VoxelAssets, VoxelWorld, MESH_CHUNK, VOXEL};
@@ -38,7 +38,20 @@ struct ChunkPair {
 #[derive(Resource, Default)]
 pub struct ChunkEntities {
     map: HashMap<IVec3, ChunkPair>,
+    /// Morceaux proches (≤ 70 m) pas encore maillés : sert à l'écran de
+    /// chargement.
+    pub pending_near: usize,
 }
+
+/// Attributs compacts : 24 octets par sommet au lieu de 48. Les identifiants
+/// et noms sont ceux des attributs standard, seul le format change.
+const NORMAL_S8: MeshVertexAttribute =
+    MeshVertexAttribute::new("Vertex_Normal", 1, VertexFormat::Snorm8x4);
+const UV_U16: MeshVertexAttribute = MeshVertexAttribute::new("Vertex_Uv", 2, VertexFormat::Unorm16x2);
+const COLOR_U8: MeshVertexAttribute = MeshVertexAttribute::new("Vertex_Color", 5, VertexFormat::Unorm8x4);
+/// Les UV sont stockés divisés par cette valeur (`uv_transform` du matériau
+/// la compense).
+pub const UV_SCALE: f32 = 64.0;
 
 /// Luminosité selon l'occlusion ambiante d'un coin (0 = très enfoncé).
 const AO_LEVELS: [f32; 4] = [0.50, 0.68, 0.84, 1.0];
@@ -136,9 +149,9 @@ pub fn build(world: &impl Cells, chunk_corner: IVec3, glass_pass: bool) -> Mesh 
 pub fn build_pass(world: &impl Cells, chunk_corner: IVec3, pass: u8) -> Mesh {
     let glass_pass = pass != 0;
     let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut uvs: Vec<[f32; 2]> = Vec::new();
-    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut normals: Vec<[i8; 4]> = Vec::new();
+    let mut uvs: Vec<[u16; 2]> = Vec::new();
+    let mut colors: Vec<[u8; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
     let min = chunk_corner.max(IVec3::ZERO);
@@ -187,6 +200,10 @@ pub fn build_pass(world: &impl Cells, chunk_corner: IVec3, pass: u8) -> Mesh {
                     let mut back = here;
                     back[axis] = slice + 1;
 
+                    // Le dessous du monde ne se voit jamais.
+                    if axis == 1 && slice == -1 {
+                        continue;
+                    }
                     let value: u32 = if glass_pass {
                         if in_pass(world, here, pass) && !world.solid(back) {
                             ((world.mat(here) as u32 + 1) << 1) | 1 | (0xFF << 16)
@@ -261,20 +278,16 @@ pub fn build_pass(world: &impl Cells, chunk_corner: IVec3, pass: u8) -> Mesh {
                     let p2 = corner(&min, &origin, axis, u, v, (i + w) as i32, (j + h) as i32, plane);
                     let p3 = corner(&min, &origin, axis, u, v, i as i32, (j + h) as i32, plane);
 
-                    let mut normal = [0.0f32; 3];
-                    normal[axis] = if forward { 1.0 } else { -1.0 };
+                    let mut normal = [0i8; 4];
+                    normal[axis] = if forward { 127 } else { -127 };
 
                     let (quad, ao) = if forward {
                         ([p0, p1, p2, p3], ao)
                     } else {
                         ([p3, p2, p1, p0], [ao[3], ao[2], ao[1], ao[0]])
                     };
-                    let quad_uv = [
-                        [0.0, 0.0],
-                        [w as f32, 0.0],
-                        [w as f32, h as f32],
-                        [0.0, h as f32],
-                    ];
+                    let enc = |v: usize| ((v as f32 / UV_SCALE) * 65535.0).round() as u16;
+                    let quad_uv = [[0, 0], [enc(w), 0], [enc(w), enc(h)], [0, enc(h)]];
 
                     let base = positions.len() as u32;
                     for k in 0..4 {
@@ -282,7 +295,8 @@ pub fn build_pass(world: &impl Cells, chunk_corner: IVec3, pass: u8) -> Mesh {
                         normals.push(normal);
                         uvs.push(quad_uv[k]);
                         let f = AO_LEVELS[ao[k]];
-                        colors.push([color[0] * f, color[1] * f, color[2] * f, color[3]]);
+                        let q = |c: f32| (c * f * 255.0).round().clamp(0.0, 255.0) as u8;
+                        colors.push([q(color[0]), q(color[1]), q(color[2]), 255]);
                     }
                     // Diagonale choisie selon l'occlusion : pas de couture.
                     if ao[0] + ao[2] >= ao[1] + ao[3] {
@@ -301,14 +315,16 @@ pub fn build_pass(world: &impl Cells, chunk_corner: IVec3, pass: u8) -> Mesh {
         }
     }
 
+    // Pas de copie côté processeur : le maillage ne vit que sur la carte
+    // graphique (économie de mémoire vive).
     let mut mesh = Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
-        bevy::asset::RenderAssetUsages::default(),
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(NORMAL_S8, VertexAttributeValues::Snorm8x4(normals));
+    mesh.insert_attribute(UV_U16, VertexAttributeValues::Unorm16x2(uvs));
+    mesh.insert_attribute(COLOR_U8, VertexAttributeValues::Unorm8x4(colors));
     mesh.insert_indices(Indices::U32(indices));
     mesh
 }
@@ -402,9 +418,12 @@ fn rebuild_chunk(
     }
 }
 
-/// Reconstruit les morceaux touchés (budget par frame), ou toute la carte
-/// après une régénération.
+/// Reconstruit les morceaux touchés (budget par frame) et charge / décharge
+/// les maillages selon la distance à la caméra : seuls les morceaux à portée
+/// d'affichage existent en mémoire.
+#[allow(clippy::too_many_arguments)]
 pub fn refresh_chunks(
+    time: Res<Time>,
     mut world: ResMut<VoxelWorld>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
@@ -412,36 +431,91 @@ pub fn refresh_chunks(
     mut existing: Query<&mut Mesh3d, With<VoxelMesh>>,
     all: Query<Entity, With<VoxelMesh>>,
     assets: Res<VoxelAssets>,
+    settings: Res<crate::game::Settings>,
     camera: Query<&GlobalTransform, With<crate::player::WorldCamera>>,
+    mut scan_timer: Local<f32>,
 ) {
     if world.full_rebuild {
         for entity in &all {
             commands.entity(entity).despawn();
         }
         chunks.map.clear();
-        // Les morceaux sont remaillés au fil des frames, les plus proches de
-        // la caméra d'abord (voir le budget ci-dessous).
         world.full_rebuild = false;
-        let keys = world.allocated_chunks();
-        let dirty = world.dirty_chunks_mut();
-        dirty.clear();
-        dirty.extend(keys);
+        world.dirty_chunks_mut().clear();
+        *scan_timer = 0.0;
     }
 
-    if world.dirty_chunks_mut().is_empty() {
-        return;
-    }
-
-    // Les morceaux les plus proches de la caméra d'abord.
     let eye = camera
         .single()
         .map(|c| c.translation())
         .unwrap_or(Vec3::ZERO);
     let origin = world.origin;
+    let center_of = |k: IVec3| origin + (k.as_vec3() + 0.5) * CHUNK as f32 * VOXEL;
+    let radius = settings.view_distance + 24.0;
+    let half_diag = CHUNK as f32 * VOXEL * 0.87;
+
+    // Balayage : ce qui entre à portée est mis en file, ce qui sort est
+    // déchargé.
+    *scan_timer -= time.delta_secs();
+    if *scan_timer <= 0.0 {
+        *scan_timer = 0.4;
+        let grid = world.chunk_grid();
+        let mut unload = Vec::new();
+        for x in 0..grid.x {
+            for z in 0..grid.z {
+                // Colonne entière trop loin : on saute vite.
+                let flat = Vec3::new(
+                    origin.x + (x as f32 + 0.5) * CHUNK as f32 * VOXEL - eye.x,
+                    0.0,
+                    origin.z + (z as f32 + 0.5) * CHUNK as f32 * VOXEL - eye.z,
+                );
+                let far = flat.length() > radius + 90.0 + half_diag;
+                for y in 0..grid.y {
+                    let k = IVec3::new(x, y, z);
+                    if far {
+                        if chunks.map.contains_key(&k) {
+                            unload.push(k);
+                        }
+                        continue;
+                    }
+                    let d = center_of(k).distance(eye);
+                    let present = chunks.map.contains_key(&k);
+                    if d <= radius + half_diag {
+                        if !present && world.chunk_allocated(k) {
+                            world.dirty_chunks_mut().insert(k);
+                        }
+                    } else if present && d > radius + 90.0 + half_diag {
+                        unload.push(k);
+                    }
+                }
+            }
+        }
+        for k in unload {
+            if let Some(pair) = chunks.map.remove(&k) {
+                for e in [pair.opaque, pair.glass, pair.lamp].into_iter().flatten() {
+                    commands.entity(e).despawn();
+                }
+            }
+        }
+    }
+
+    // File d'attente : ce qui est trop loin est abandonné.
+    let limit = radius + 90.0 + half_diag;
+    world
+        .dirty_chunks_mut()
+        .retain(|k| center_of(*k).distance(eye) <= limit);
+    chunks.pending_near = world
+        .dirty_chunks_mut()
+        .iter()
+        .filter(|k| center_of(**k).distance(eye) <= 70.0)
+        .count();
+    if world.dirty_chunks_mut().is_empty() {
+        return;
+    }
+
+    // Les morceaux les plus proches de la caméra d'abord.
     let mut keys: Vec<IVec3> = world.dirty_chunks_mut().iter().copied().collect();
-    let dist = |k: &IVec3| {
-        (origin + (k.as_vec3() + 0.5) * CHUNK as f32 * VOXEL).distance_squared(eye)
-    };
+    let dist = |k: &IVec3| center_of(*k).distance_squared(eye);
     // Gros chantier (chargement de la carte) : budget élargi.
     let budget = if keys.len() > 400 { BUDGET * 4 } else { BUDGET };
     if keys.len() > budget {
@@ -472,9 +546,9 @@ mod tests {
         let mut world = VoxelWorld::new();
         world.fill(IVec3::new(0, 0, 0), IVec3::new(16, 1, 16), 0);
         let mesh = build(&world, IVec3::ZERO, false);
-        // Six faces, chacune fusionnée en un seul quad — y compris celles
-        // posées sur le bord de la grille (-X, -Y, -Z), qui manquaient avant.
-        assert_eq!(mesh.count_vertices(), 6 * 4);
+        // Cinq faces fusionnées en un seul quad chacune (le dessous du monde
+        // ne se voit jamais), y compris celles posées sur le bord (-X, -Z).
+        assert_eq!(mesh.count_vertices(), 5 * 4);
     }
 
     #[test]
@@ -513,5 +587,56 @@ mod tests {
         let world = VoxelWorld::new();
         let mesh = build(&world, IVec3::new(32, 16, 32), false);
         assert_eq!(mesh.count_vertices(), 0);
+    }
+}
+
+#[cfg(test)]
+mod memory_probe {
+    use super::*;
+
+    fn rss_mb() -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("VmRSS"))
+                    .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+            })
+            .unwrap_or(0)
+            / 1024
+    }
+
+    #[test]
+    #[ignore]
+    fn world_and_mesh_memory() {
+        let r0 = rss_mb();
+        let mut w = VoxelWorld::new();
+        w.rebuild(4242);
+        let r1 = rss_mb();
+        let keys = w.allocated_chunks();
+        let mut verts = 0usize;
+        let mut idx = 0usize;
+        let mut meshes = Vec::new();
+        for k in &keys {
+            for pass in 0..3 {
+                let m = build_pass(&w, *k * CHUNK, pass);
+                verts += m.count_vertices();
+                idx += m.indices().map_or(0, |i| i.len());
+                if m.count_vertices() > 0 {
+                    meshes.push(m);
+                }
+            }
+        }
+        let r2 = rss_mb();
+        println!(
+            "monde : +{} Mo ({} morceaux, {} voxels) · maillages : +{} Mo ({} sommets, {} indices, {} maillages)",
+            r1 - r0,
+            keys.len(),
+            w.alive,
+            r2 - r1,
+            verts,
+            idx,
+            meshes.len()
+        );
     }
 }

@@ -58,6 +58,8 @@ pub struct Destroyer<'w, 's> {
     pub game: ResMut<'w, GameState>,
     pub blasts: MessageWriter<'w, Blast>,
     pub net: ResMut<'w, NetClient>,
+    pub particles: Res<'w, fx::ParticleAssets>,
+    pub density: Res<'w, fx::ParticleDensity>,
 }
 
 impl Destroyer<'_, '_> {
@@ -111,6 +113,7 @@ impl Destroyer<'_, '_> {
     /// autres joueurs).
     pub fn effects(&mut self, at: Vec3, radius: f32) {
         fx::flash(&mut self.commands, at, 1.0 + radius);
+        fx::dust(&mut self.commands, &self.particles, self.density.0, 0, at, radius * 60.0, true);
         fx::fireball(&mut self.commands, &self.fire, at, radius);
         let (kind, volume) = if radius > 5.0 {
             (SfxKind::BigBoom, 1.0)
@@ -650,7 +653,7 @@ pub fn act(
             let material = d.game.build_material();
             d.world.set(cell, true, material);
             hands.cooldown = spec.cooldown;
-            d.sound(SfxKind::Hit, 0.35, hit.point);
+            d.sound(SfxKind::Thunk, 0.6, hit.point);
             if online {
                 d.net.send_raw(crate::net::protocol::Packet::Place {
                     cell: [cell.x as u16, cell.y as u16, cell.z as u16],
