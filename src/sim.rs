@@ -21,7 +21,7 @@ pub const GRAVITY: f32 = 9.81;
 /// Nombre maximal de blocs de gravats simultanés.
 pub const MAX_BLOCKS: usize = 900;
 /// Nombre maximal de corps rigides simultanés.
-pub const MAX_BODIES: usize = 24;
+pub const MAX_BODIES: usize = 64;
 /// Points de collision par corps.
 const MAX_SAMPLES: usize = 420;
 /// Vitesse d'impact (m/s) à partir de laquelle un corps casse.
@@ -293,6 +293,8 @@ pub struct Sim {
     pub bodies: Vec<Body>,
     next_id: u32,
     rng: SimRng,
+    /// Corps à briser après un impact violent (traité en fin de pas).
+    pending_fracture: Vec<u32>,
 }
 
 impl Default for Sim {
@@ -308,6 +310,7 @@ impl Sim {
             bodies: Vec::new(),
             next_id: 1,
             rng: SimRng(0x9E37_79B9_7F4A_7C15),
+            pending_fracture: Vec::new(),
         }
     }
 
@@ -625,6 +628,7 @@ impl Sim {
     fn step_bodies(&mut self, world: &mut VoxelWorld, dt: f32, ev: &mut Vec<SimEvent>) {
         let mut breaks: Vec<(usize, Vec3, f32)> = Vec::new();
         let mut settle: Vec<usize> = Vec::new();
+        let mut fracture_ids: Vec<u32> = Vec::new();
         for (bi, body) in self.bodies.iter_mut().enumerate() {
             body.cooldown = (body.cooldown - dt).max(0.0);
             body.lin.y -= GRAVITY * dt;
@@ -716,6 +720,10 @@ impl Sim {
                 if worst_speed > BREAK_SPEED && body.cooldown <= 0.0 {
                     body.cooldown = 0.12;
                     breaks.push((bi, worst_point, worst_speed));
+                    // Gros morceau + gros choc : il se brise en plusieurs.
+                    if worst_speed > 6.0 && body.grid.dims.max_element() > 14 {
+                        fracture_ids.push(body.id);
+                    }
                 }
                 // Amortissement au contact : un corps posé s'immobilise.
                 body.lin *= 1.0 - 2.5 * dt;
@@ -738,6 +746,7 @@ impl Sim {
             }
         }
 
+        self.pending_fracture.extend(fracture_ids);
         // Impacts : casse le corps et le monde autour du point de contact.
         let mut removed: Vec<u32> = Vec::new();
         let mut new_bodies: Vec<Body> = Vec::new();
@@ -908,20 +917,35 @@ impl Sim {
             self.bodies.push(nb);
         }
 
-        // Corps au repos : on les fige dans le monde.
+        // Corps au repos : un gros morceau se brise encore (il ne « gèle »
+        // pas), un petit morceau penché devient un tas de gravats, le reste
+        // se fige dans le monde.
         settle.sort_unstable();
         settle.dedup();
+        let mut to_fracture: Vec<u32> = Vec::new();
         for bi in settle.into_iter().rev() {
             if bi >= self.bodies.len() {
+                continue;
+            }
+            let count = self.bodies[bi].grid.count();
+            let tilted = tilt_degrees(self.bodies[bi].rot) > 6.0;
+            if count > 450 && self.bodies.len() + to_fracture.len() < MAX_BODIES && self.bodies[bi].pos.y > -15.0 {
+                to_fracture.push(self.bodies[bi].id);
                 continue;
             }
             let body = self.bodies.remove(bi);
             if !removed.contains(&body.id) {
                 removed.push(body.id);
             }
+            if tilted && count > 0 {
+                let ids = self.body_to_rubble(&body);
+                if !ids.is_empty() {
+                    ev.push(SimEvent::BlocksAdded(ids));
+                }
+                continue;
+            }
             let placed = bake(world, &body);
             if !placed.is_empty() {
-                // Peut-être encore en l'air : à surveiller par l'appelant.
                 ev.push(SimEvent::WorldPlaced(placed));
             }
         }
@@ -929,6 +953,190 @@ impl Sim {
             self.bodies.retain(|b| b.id != id);
             ev.push(SimEvent::BodyRemoved(id));
         }
+        // Un impact violent brise aussi les gros morceaux.
+        for id in std::mem::take(&mut self.pending_fracture) {
+            if !to_fracture.contains(&id) {
+                to_fracture.push(id);
+            }
+        }
+        for id in to_fracture {
+            self.fracture(id, ev);
+        }
+    }
+
+    /// Brise un corps en plusieurs morceaux (découpe par graines, chacune
+    /// reste un solide rigide qui continue de tomber et de se briser).
+    pub fn fracture(&mut self, id: u32, ev: &mut Vec<SimEvent>) {
+        let Some(bi) = self.bodies.iter().position(|b| b.id == id) else { return };
+        if self.bodies.len() >= MAX_BODIES {
+            return;
+        }
+        let body = self.bodies.remove(bi);
+        ev.push(SimEvent::BodyRemoved(id));
+        let solid: Vec<IVec3> = {
+            let d = body.grid.dims;
+            let mut v = Vec::with_capacity(body.grid.count());
+            for x in 0..d.x {
+                for y in 0..d.y {
+                    for z in 0..d.z {
+                        let c = IVec3::new(x, y, z);
+                        if body.grid.is_solid(c) {
+                            v.push(c);
+                        }
+                    }
+                }
+            }
+            v
+        };
+        let n = (solid.len() / 280).clamp(2, 8);
+        let seeds: Vec<Vec3> = (0..n)
+            .map(|_| solid[self.rng.usize(solid.len())].as_vec3())
+            .collect();
+        // Chaque voxel va à la graine la plus proche.
+        let mut groups: Vec<Vec<IVec3>> = vec![Vec::new(); n];
+        for &c in &solid {
+            let p = c.as_vec3();
+            let mut best = 0;
+            let mut best_d = f32::MAX;
+            for (i, s) in seeds.iter().enumerate() {
+                let d = p.distance_squared(*s);
+                if d < best_d {
+                    best_d = d;
+                    best = i;
+                }
+            }
+            groups[best].push(c);
+        }
+        let mut made = 0;
+        for group in groups {
+            if group.is_empty() {
+                continue;
+            }
+            // Un groupe peut être en plusieurs morceaux non reliés.
+            let mut sub = BodyGrid::new(body.grid.dims);
+            for &c in &group {
+                sub.set(c, Some(body.grid.material(c)));
+            }
+            for comp in split_components(&sub) {
+                let mut lo = comp[0];
+                let mut hi = comp[0];
+                for &c in &comp {
+                    lo = lo.min(c);
+                    hi = hi.max(c);
+                }
+                let mut g = BodyGrid::new(hi - lo + IVec3::ONE);
+                for &c in &comp {
+                    g.set(c - lo, Some(body.grid.material(c)));
+                }
+                if comp.len() < 12 || self.bodies.len() >= MAX_BODIES {
+                    // Trop petit : poussière de gravats.
+                    let mut temp = Body {
+                        id: 0,
+                        grid: g,
+                        com: Vec3::ZERO,
+                        pos: body.pos + body.rot * (lo.as_vec3() * VOXEL - body.com),
+                        rot: body.rot,
+                        lin: body.lin,
+                        ang: body.ang,
+                        mass: 0.0,
+                        inv_inertia: Mat3::IDENTITY,
+                        samples: Vec::new(),
+                        rest: 0.0,
+                        cooldown: 0.0,
+                    };
+                    if temp.recompute() {
+                        let ids = self.body_to_rubble(&temp);
+                        if !ids.is_empty() {
+                            ev.push(SimEvent::BlocksAdded(ids));
+                        }
+                    }
+                    continue;
+                }
+                let center_local = comp.iter().map(|c| c.as_vec3()).sum::<Vec3>() / comp.len() as f32 * VOXEL;
+                let away = (body.rot * (center_local - body.com)).normalize_or_zero();
+                let new_id = self.next_id;
+                self.next_id = self.next_id.wrapping_add(1).max(1);
+                let jitter = Vec3::new(self.rng.signed(), self.rng.f32() * 0.5, self.rng.signed());
+                let mut nb = Body {
+                    id: new_id,
+                    grid: g,
+                    com: Vec3::ZERO,
+                    pos: body.pos + body.rot * (lo.as_vec3() * VOXEL - body.com),
+                    rot: body.rot,
+                    lin: body.lin * 0.8 + away * 1.6 + jitter * 0.8,
+                    ang: body.ang * 0.8 + Vec3::new(self.rng.signed(), self.rng.signed() * 0.5, self.rng.signed()) * 0.6,
+                    mass: 0.0,
+                    inv_inertia: Mat3::IDENTITY,
+                    samples: Vec::new(),
+                    rest: 0.0,
+                    cooldown: 0.25,
+                };
+                if nb.recompute() {
+                    ev.push(SimEvent::BodyChanged(new_id));
+                    self.bodies.push(nb);
+                    made += 1;
+                }
+            }
+        }
+        let _ = made;
+        ev.push(SimEvent::Impact {
+            at: body.pos,
+            power: 8.0 + (solid.len() as f32).sqrt() * 0.15,
+        });
+    }
+
+    /// Transforme un corps en blocs de gravats (un par zone 2×2×2).
+    fn body_to_rubble(&mut self, body: &Body) -> Vec<u32> {
+        use std::collections::HashMap;
+        let mut zones: HashMap<IVec3, (Vec3, u32, u8)> = HashMap::new();
+        let d = body.grid.dims;
+        for x in 0..d.x {
+            for y in 0..d.y {
+                for z in 0..d.z {
+                    let c = IVec3::new(x, y, z);
+                    if !body.grid.is_solid(c) {
+                        continue;
+                    }
+                    let key = c.div_euclid(IVec3::splat(ZONE));
+                    let m = body.grid.material(c);
+                    let e = zones.entry(key).or_insert((Vec3::ZERO, 0, m));
+                    e.0 += body.cell_world(c);
+                    e.1 += 1;
+                }
+            }
+        }
+        let mut list: Vec<(Vec3, u8)> = zones
+            .into_values()
+            .filter(|(_, _, m)| *m != mat::GLASS)
+            .map(|(sum, n, m)| (sum / n as f32, m))
+            .collect();
+        if list.len() > MAX_PER_HIT {
+            for i in 0..MAX_PER_HIT {
+                let j = i + self.rng.usize(list.len() - i);
+                list.swap(i, j);
+            }
+            list.truncate(MAX_PER_HIT);
+        }
+        let mut ids = Vec::new();
+        for (c, m) in list {
+            let half = Vec3::splat(VOXEL * ZONE as f32 * 0.45);
+            let id = self.new_id();
+            let v = body.velocity_at(c) * 0.5 + Vec3::new(self.rng.signed(), self.rng.f32() * 0.4, self.rng.signed()) * 0.8;
+            self.blocks.push(Block {
+                id,
+                pos: c,
+                yaw: 0.0,
+                vel: v,
+                spin: self.rng.signed() * 3.0,
+                half,
+                mat: m,
+                mass: half.x * half.y * half.z * 8.0 * density(m),
+                sleeping: false,
+                rest: 0.0,
+            });
+            ids.push(id);
+        }
+        ids
     }
 
     // ------------------------------------------------------------------
@@ -972,6 +1180,18 @@ impl Sim {
         }
         best
     }
+}
+
+/// Écart (degrés) entre l'orientation du corps et l'alignement sur les axes
+/// du monde : un corps proche de 0° peut se figer proprement.
+fn tilt_degrees(rot: Quat) -> f32 {
+    let mut worst = 0.0f32;
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        let v = rot * axis;
+        let m = v.abs().max_element().clamp(0.0, 1.0);
+        worst = worst.max(m.acos().to_degrees());
+    }
+    worst
 }
 
 /// Composantes connexes (6 voisins) d'une grille.

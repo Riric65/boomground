@@ -181,6 +181,71 @@ fn thunk(dur: f32) -> AudioSource {
     render(dur, |t| (std::f32::consts::TAU * (150.0 - 400.0 * t) * t).sin() * (-28.0 * t).exp())
 }
 
+/// Deux battements sourds (« toum-toum »).
+fn heartbeat() -> AudioSource {
+    render(0.9, |t| {
+        let beat = |t0: f32, amp: f32| {
+            let x = t - t0;
+            if x < 0.0 {
+                0.0
+            } else {
+                (std::f32::consts::TAU * (58.0 - 20.0 * x) * x).sin() * (-14.0 * x).exp() * amp
+            }
+        };
+        beat(0.0, 1.0) + beat(0.28, 0.75)
+    })
+}
+
+/// Choc : souffle coupé + grave.
+fn hurt_sound(dur: f32) -> AudioSource {
+    let mut n = Noise(2024);
+    let mut low = 0.0f32;
+    render(dur, |t| {
+        low += (n.next() - low) * 0.05;
+        let thump = (std::f32::consts::TAU * (95.0 - 60.0 * t) * t).sin() * (-8.0 * t).exp();
+        thump + low * 1.6 * (-4.0 * t).exp()
+    })
+}
+
+/// Sifflement aigu qui décroît lentement.
+fn ring(dur: f32) -> AudioSource {
+    render(dur, |t| {
+        let env = (-1.6 * t).exp() * (t * 200.0).min(1.0);
+        ((std::f32::consts::TAU * 4_200.0 * t).sin() * 0.6 + (std::f32::consts::TAU * 4_650.0 * t).sin() * 0.4) * env * 0.35
+    })
+}
+
+/// Grincement : balayage de fréquence avec harmoniques.
+fn door_creak(dur: f32) -> AudioSource {
+    let mut phase = 0.0f32;
+    render(dur, |t| {
+        let f = 180.0 + 120.0 * (std::f32::consts::TAU * 1.7 * t).sin() + 140.0 * t;
+        phase += std::f32::consts::TAU * f / RATE as f32;
+        let env = (t * 12.0).min(1.0) * (1.0 - t / dur);
+        (phase.sin() + 0.5 * (phase * 2.0).sin() + 0.3 * (phase * 3.0).sin()) * env * 0.4
+    })
+}
+
+/// Moteur : onde en dents de scie grave modulée (bouclable).
+fn engine(dur: f32) -> AudioSource {
+    render(dur, |t| {
+        let f = 70.0;
+        let saw = (t * f).fract() * 2.0 - 1.0;
+        let pulse = (std::f32::consts::TAU * 28.0 * t).sin() * 0.3 + 0.7;
+        saw * pulse * 0.6 + (std::f32::consts::TAU * f * 0.5 * t).sin() * 0.4
+    })
+}
+
+/// Klaxon : deux notes tenues.
+fn horn(dur: f32) -> AudioSource {
+    render(dur, |t| {
+        let env = (t * 60.0).min(1.0) * ((dur - t) * 40.0).clamp(0.0, 1.0);
+        let a = (std::f32::consts::TAU * 392.0 * t).sin().signum();
+        let b = (std::f32::consts::TAU * 494.0 * t).sin().signum();
+        (a + b) * 0.25 * env
+    })
+}
+
 /// Les sons du jeu.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum SfxKind {
@@ -204,9 +269,23 @@ pub enum SfxKind {
     Crackle,
     /// Pose d'un bloc.
     Thunk,
+    /// Battement de cœur (points de vie bas).
+    Heartbeat,
+    /// Douleur : souffle coupé, choc violent.
+    Hurt,
+    /// Acouphène après une explosion proche.
+    Ring,
+    /// Porte qui grince.
+    Door,
+    /// Moteur (boucle courte, hauteur selon la vitesse).
+    Engine,
+    /// Klaxon.
+    Horn,
+    /// Éclat de verre / métal tordu : impact de véhicule.
+    Scrape,
 }
 
-const ALL_SFX: [SfxKind; 16] = [
+const ALL_SFX: [SfxKind; 23] = [
     SfxKind::Swing,
     SfxKind::Hit,
     SfxKind::Shot,
@@ -223,6 +302,13 @@ const ALL_SFX: [SfxKind; 16] = [
     SfxKind::Crash,
     SfxKind::Crackle,
     SfxKind::Thunk,
+    SfxKind::Heartbeat,
+    SfxKind::Hurt,
+    SfxKind::Ring,
+    SfxKind::Door,
+    SfxKind::Engine,
+    SfxKind::Horn,
+    SfxKind::Scrape,
 ];
 
 /// Son synthétisé correspondant à un effet.
@@ -244,6 +330,13 @@ fn source_for(kind: SfxKind) -> AudioSource {
         SfxKind::Crash => crash(1.1),
         SfxKind::Crackle => crackle(0.7),
         SfxKind::Thunk => thunk(0.18),
+        SfxKind::Heartbeat => heartbeat(),
+        SfxKind::Hurt => hurt_sound(0.7),
+        SfxKind::Ring => ring(2.4),
+        SfxKind::Door => door_creak(0.7),
+        SfxKind::Engine => engine(0.5),
+        SfxKind::Horn => horn(0.6),
+        SfxKind::Scrape => crash(0.5),
     }
 }
 

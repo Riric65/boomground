@@ -39,6 +39,8 @@ pub struct MenuState {
     pub status: String,
     /// Mondes sauvegardés (nom, chemin).
     pub worlds: Vec<(String, std::path::PathBuf)>,
+    /// Taille de la carte pour une nouvelle partie (pâtés de maisons).
+    pub map_blocks: u16,
 }
 
 impl Default for MenuState {
@@ -49,6 +51,7 @@ impl Default for MenuState {
             lobby_mode: Mode::Sandbox,
             status: String::new(),
             worlds: Vec::new(),
+            map_blocks: 17,
         }
     }
 }
@@ -60,6 +63,11 @@ pub enum MenuAction {
     Resume,
     SaveWorld,
     LoadWorld(usize),
+    JoinServer(usize),
+    RemoveServer(usize),
+    AddServer,
+    RefreshServers,
+    MapSize(u16),
     Leave,
     Quit,
     SelectMode(Mode),
@@ -125,6 +133,14 @@ pub struct StatusText;
 pub struct LanList;
 #[derive(Component)]
 pub struct WorldList;
+#[derive(Component)]
+pub struct ServerListUi;
+#[derive(Component)]
+pub struct AddNameField;
+#[derive(Component)]
+pub struct AddAddressField;
+#[derive(Component)]
+pub struct MapSizeButton(u16);
 #[derive(Component)]
 pub struct SettingValue(SettingKind);
 #[derive(Component)]
@@ -489,6 +505,21 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                                     .with_child(ui::label(&font, "Hasard", 17.0, ui::TEXT));
                             });
                         });
+                        p.spawn(ui::caption(&font, "Taille de la ville (plus petite = moins de mémoire)"));
+                        p.spawn(Node {
+                            column_gap: px(8.0),
+                            ..default()
+                        })
+                        .with_children(|r| {
+                            for (blocks, label) in [(9u16, "Petite"), (17, "Moyenne"), (33, "Grande")] {
+                                r.spawn((
+                                    MenuAction::MapSize(blocks),
+                                    MapSizeButton(blocks),
+                                    ui::button(150.0, 40.0, ui::BUTTON),
+                                ))
+                                .with_child(ui::label(&font, label, 16.0, ui::TEXT));
+                            }
+                        });
                         p.spawn((
                             MenuAction::Launch,
                             ui::button_with(
@@ -589,6 +620,28 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                                 .insert(join)
                                 .with_children(|c| {
                                     c.spawn(ui::text(&font, "Rejoindre", 24.0, ui::BLUE));
+                                    c.spawn(ui::caption(&font, "Mes serveurs (clique pour rejoindre)"));
+                                    c.spawn((
+                                        ServerListUi,
+                                        Node {
+                                            flex_direction: FlexDirection::Column,
+                                            row_gap: px(6.0),
+                                            min_height: px(56.0),
+                                            ..default()
+                                        },
+                                    ));
+                                    c.spawn(Node {
+                                        column_gap: px(6.0),
+                                        ..default()
+                                    })
+                                    .with_children(|r| {
+                                        let (f, t) = ui::field(&font, px(120.0), "", "Nom", 24);
+                                        r.spawn((AddNameField, f)).with_child(t);
+                                        let (f, t) = ui::field(&font, px(150.0), "", "Adresse ou code", 60);
+                                        r.spawn((AddAddressField, f)).with_child(t);
+                                        r.spawn((MenuAction::AddServer, ui::button(44.0, 44.0, ui::BUTTON_PRIMARY)))
+                                            .with_child(ui::label(&font, "+", 24.0, ui::ACCENT_DARK));
+                                    });
                                     c.spawn(ui::caption(&font, "Parties sur ton réseau"));
                                     c.spawn((
                                         LanList,
@@ -935,6 +988,7 @@ pub fn launch_solo(
     seed_text: &str,
     mode: Mode,
     load: Option<(String, std::path::PathBuf)>,
+    map_blocks: u16,
 ) -> Result<u64, String> {
     leave_online(net, lobby, game);
     let seed = game::parse_seed(seed_text).unwrap_or_else(game::random_seed);
@@ -950,6 +1004,7 @@ pub fn launch_solo(
         solo: true,
         load: load.map(|(_, p)| p),
         world_name: world_name.clone(),
+        map_blocks,
     })?;
     let address = format!("127.0.0.1:{}", handle.port);
     let token = handle.token;
@@ -995,6 +1050,7 @@ pub fn create_lobby(
         solo: false,
         load: None,
         world_name: "lobby".into(),
+        map_blocks: 17,
     })?;
     let address = format!("127.0.0.1:{}", handle.port);
     let token = handle.token;
@@ -1094,7 +1150,10 @@ pub fn actions(
         Query<&mut TextField, With<LobbySeedField>>,
         Query<&mut TextField, With<NameField>>,
         Query<&mut TextField, With<JoinField>>,
+        Query<&mut TextField, With<AddNameField>>,
+        Query<&mut TextField, With<AddAddressField>>,
     )>,
+    mut servers: ResMut<crate::servers::ServerList>,
     switches: Query<(&Switch, Has<DesktopSwitch>, Has<FirewallSwitch>)>,
     mut install_status: Query<&mut Text, With<InstallStatus>>,
     mut exit: MessageWriter<AppExit>,
@@ -1127,7 +1186,7 @@ pub fn actions(
             MenuAction::Launch => {
                 let seed_text = field_value(&fields.p0());
                 let name = field_value(&fields.p2());
-                match launch_solo(&mut net, &mut lobby, &mut game, &name, &seed_text, state.mode, None) {
+                match launch_solo(&mut net, &mut lobby, &mut game, &name, &seed_text, state.mode, None, state.map_blocks) {
                     Ok(_) => crate::player::grab(&mut cursor, true),
                     Err(e) => state.status = e,
                 }
@@ -1135,8 +1194,34 @@ pub fn actions(
             MenuAction::LoadWorld(i) => {
                 let name = field_value(&fields.p2());
                 if let Some((stem, path)) = state.worlds.get(i).cloned() {
-                    match launch_solo(&mut net, &mut lobby, &mut game, &name, "", state.mode, Some((stem, path))) {
+                    match launch_solo(&mut net, &mut lobby, &mut game, &name, "", state.mode, Some((stem, path)), state.map_blocks) {
                         Ok(_) => crate::player::grab(&mut cursor, true),
+                        Err(e) => state.status = e,
+                    }
+                }
+            }
+            MenuAction::MapSize(blocks) => state.map_blocks = blocks,
+            MenuAction::RefreshServers => servers.refresh(),
+            MenuAction::AddServer => {
+                let name = field_value(&fields.p4());
+                let address = field_value(&fields.p5());
+                if servers.add(&name, &address) {
+                    for mut f in &mut fields.p4() {
+                        f.value.clear();
+                    }
+                    for mut f in &mut fields.p5() {
+                        f.value.clear();
+                    }
+                } else {
+                    state.status = "Adresse vide ou déjà enregistrée.".into();
+                }
+            }
+            MenuAction::RemoveServer(i) => servers.remove(i),
+            MenuAction::JoinServer(i) => {
+                let name = field_value(&fields.p2());
+                if let Some(entry) = servers.entries.get(i).cloned() {
+                    match join_lobby(&mut net, &mut lobby, &mut game, &name, &entry.address) {
+                        Ok(()) => state.status = format!("Connexion à {}…", entry.name),
                         Err(e) => state.status = e,
                     }
                 }
@@ -1295,6 +1380,7 @@ pub fn flow(
     mut net: ResMut<NetClient>,
     mut lobby: ResMut<Lobby>,
     mut toasts: ResMut<Toasts>,
+    chat: Res<crate::chat::Chat>,
     shop: Res<crate::shop::ShopState>,
     fields: Query<&TextField>,
     mut cursor: Single<&mut CursorOptions>,
@@ -1318,7 +1404,7 @@ pub fn flow(
     }
 
     let escape = keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::F1);
-    if escape && !ui::typing(&fields) {
+    if escape && !ui::typing(&fields) && !game.typing && !chat.closed_now {
         match game.phase {
             Phase::Playing if !shop.open => game.phase = Phase::Menu,
             Phase::Menu if game.started => {
@@ -1427,6 +1513,98 @@ pub fn world_list(
                 });
         }
     });
+}
+
+/// Liste des serveurs enregistrés (onglet Multijoueur).
+pub fn server_list_ui(
+    game: Res<GameState>,
+    state: Res<MenuState>,
+    font: Res<UiFont>,
+    mut servers: ResMut<crate::servers::ServerList>,
+    list: Query<Entity, With<ServerListUi>>,
+    mut shown: Local<u32>,
+    mut commands: Commands,
+) {
+    let active = game.phase == Phase::Menu && state.tab == Tab::Multi;
+    servers.poll(active);
+    if !active {
+        *shown = u32::MAX;
+        return;
+    }
+    if *shown == servers.revision {
+        return;
+    }
+    *shown = servers.revision;
+    let Ok(list) = list.single() else { return };
+    commands.entity(list).despawn_children();
+    commands.entity(list).with_children(|l| {
+        if servers.entries.is_empty() {
+            l.spawn(ui::text(&font, "Aucun serveur : ajoute-en un ci-dessous.", 15.0, ui::MUTED));
+            return;
+        }
+        for (i, e) in servers.entries.iter().enumerate() {
+            let (detail, color) = match &e.state {
+                crate::servers::State::Online(info) => {
+                    let mode = if info.mode == 1 { "Normal" } else { "Bac à sable" };
+                    let old = info.version != crate::net::protocol::PROTOCOL_VERSION;
+                    (
+                        format!(
+                            "{}/{} · {} · {} ms{}",
+                            info.players,
+                            info.max,
+                            mode,
+                            info.ping_ms,
+                            if old { " · version différente" } else { "" }
+                        ),
+                        if old { ui::HOT } else { ui::GREEN },
+                    )
+                }
+                crate::servers::State::Offline => ("hors ligne".to_string(), ui::RED),
+                _ => ("…".to_string(), ui::MUTED),
+            };
+            l.spawn(Node {
+                column_gap: px(6.0),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn((
+                    MenuAction::JoinServer(i),
+                    ui::button_with(
+                        Node {
+                            flex_grow: 1.0,
+                            min_height: px(52.0),
+                            flex_direction: FlexDirection::Column,
+                            justify_content: JustifyContent::Center,
+                            padding: UiRect::horizontal(px(12.0)),
+                            ..default()
+                        },
+                        ui::CARD_HOVER,
+                    ),
+                ))
+                .with_children(|b| {
+                    b.spawn(ui::text(&font, e.name.clone(), 17.0, ui::TEXT));
+                    let motd = match &e.state {
+                        crate::servers::State::Online(info) if !info.motd.is_empty() => info.motd.clone(),
+                        _ => e.address.clone(),
+                    };
+                    b.spawn(ui::text(&font, motd, 12.0, ui::MUTED));
+                    b.spawn(ui::text(&font, detail, 12.0, color));
+                });
+                row.spawn((MenuAction::RemoveServer(i), ui::button(38.0, 52.0, Color::srgba(0.35, 0.08, 0.08, 0.85))))
+                    .with_child(ui::label(&font, "✕", 16.0, ui::TEXT));
+            });
+        }
+    });
+}
+
+/// Contour de la taille de carte choisie.
+pub fn map_size_highlight(state: Res<MenuState>, mut buttons: Query<(&MapSizeButton, &mut BorderColor)>) {
+    for (b, mut border) in &mut buttons {
+        let c = if b.0 == state.map_blocks { ui::ACCENT } else { ui::LINE };
+        if border.top != c {
+            *border = BorderColor::all(c);
+        }
+    }
 }
 
 /// Solo : le serveur privé se met en pause quand le menu est ouvert.

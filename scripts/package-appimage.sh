@@ -15,6 +15,7 @@ rm -rf "$appdir"
 mkdir -p "$appdir/usr/bin"
 cp target/release/boomground "$appdir/usr/bin/boomground"
 cp assets/icon/boomground.png "$appdir/boomground.png"
+cp assets/icon/boomground.png "$appdir/.DirIcon"
 
 cat > "$appdir/boomground.desktop" <<DESKTOP
 [Desktop Entry]

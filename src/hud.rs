@@ -40,6 +40,8 @@ pub struct CrosshairRoot;
 #[derive(Component)]
 pub struct LoadingRoot;
 #[derive(Component)]
+pub struct DamageOverlay;
+#[derive(Component)]
 pub struct LoadingBar;
 #[derive(Component)]
 pub struct LoadingText;
@@ -171,6 +173,20 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 })
                 .with_child((HudLabel::Players, ui::text(&font, "", 15.0, ui::TEXT)));
         });
+
+    // Voile rouge des dégâts (sous l'interface).
+    commands.spawn((
+        Hud,
+        DamageOverlay,
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.8, 0.0, 0.0, 0.0)),
+        GlobalZIndex(-1),
+    ));
 
     // Écran de chargement (par-dessus tout).
     commands
@@ -625,7 +641,8 @@ pub fn loading_screen(
     mut calm: Local<f32>,
 ) {
     if game.loading {
-        let pending = chunks.pending_near;
+        // Tout ce qui est dans la distance d'affichage doit être maillé.
+        let pending = chunks.pending_all + if chunks.scanned { 0 } else { 10_000 };
         let stage_gen = loading.installed_at.is_none();
         if stage_gen {
             *initial = 0;
@@ -645,8 +662,10 @@ pub fn loading_screen(
             let waited = loading.installed_at.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
             // Prêt : le terrain proche est maillé (et on a attendu un peu).
             if pending == 0 && waited > 0.8 {
+                // Quelques instants de plus : envoi des maillages au GPU,
+                // compilation des shaders.
                 *calm += time.delta_secs();
-                if *calm > 0.2 {
+                if *calm > 0.9 {
                     game.loading = false;
                     game.loading_progress = 1.0;
                 }
@@ -675,6 +694,29 @@ pub fn loading_screen(
         };
         if t.0 != s {
             t.0 = s.to_string();
+        }
+    }
+}
+
+/// Voile rouge : coup reçu (qui s'estompe) + pulsation quand la vie est basse.
+pub fn damage_overlay(
+    time: Res<Time>,
+    game: Res<GameState>,
+    mut overlay: Query<&mut BackgroundColor, With<DamageOverlay>>,
+) {
+    let low = if game.dead {
+        0.55
+    } else if game.hp < 40.0 {
+        let danger = 1.0 - game.hp / 40.0;
+        danger * (0.16 + 0.1 * (time.elapsed_secs() * (3.0 + danger * 5.0)).sin().abs())
+    } else {
+        0.0
+    };
+    let alpha = (game.hurt_flash * 0.5 + low).min(0.7);
+    for mut bg in &mut overlay {
+        let c = Color::srgba(0.75, 0.02, 0.02, alpha);
+        if bg.0 != c {
+            bg.0 = c;
         }
     }
 }

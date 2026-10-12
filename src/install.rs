@@ -297,13 +297,9 @@ mod platform {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
-    const ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-<rect width="64" height="64" rx="12" fill="#151a24"/>
-<circle cx="30" cy="38" r="17" fill="#2b2b2b" stroke="#ffb627" stroke-width="3"/>
-<path d="M40 22 l6 -6" stroke="#ffb627" stroke-width="4" stroke-linecap="round"/>
-<circle cx="49" cy="13" r="4" fill="#ff5a36"/>
-</svg>
-"##;
+    /// Icône du jeu (512 × 512).
+    const ICON: &[u8] = include_bytes!("../assets/icon/boomground.png");
+
 
     fn data_home() -> Result<PathBuf, String> {
         Ok(std::env::var_os("XDG_DATA_HOME")
@@ -326,7 +322,7 @@ mod platform {
         let mut warnings = Vec::new();
         std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
         let data = data_home()?;
-        write(&data.join("icons/hicolor/scalable/apps/boomground.svg"), ICON.as_bytes())?;
+        write(&data.join("icons/hicolor/512x512/apps/boomground.png"), ICON)?;
         let desktop = format!(
             "[Desktop Entry]\nType=Application\nName={NAME}\nComment=Destruction de voxels\n\
              Exec=\"{}\"\nIcon=boomground\nTerminal=false\nCategories=Game;ActionGame;\n",
@@ -369,7 +365,7 @@ mod platform {
     pub fn uninstall() -> Result<(), String> {
         let data = data_home()?;
         let _ = std::fs::remove_file(data.join("applications/boomground.desktop"));
-        let _ = std::fs::remove_file(data.join("icons/hicolor/scalable/apps/boomground.svg"));
+        let _ = std::fs::remove_file(data.join("icons/hicolor/512x512/apps/boomground.png"));
         let _ = std::fs::remove_file(home()?.join(".local/bin/boomground"));
         let _ = std::fs::remove_file(home()?.join("Desktop/boomground.desktop"));
         let config = std::env::var_os("XDG_CONFIG_HOME")

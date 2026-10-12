@@ -114,6 +114,10 @@ impl Destroyer<'_, '_> {
     pub fn effects(&mut self, at: Vec3, radius: f32) {
         fx::flash(&mut self.commands, at, 1.0 + radius);
         fx::dust(&mut self.commands, &self.particles, self.density.0, 0, at, radius * 60.0, true);
+        if radius > 2.0 {
+            // Fracas : acouphène si l'explosion est toute proche.
+            fx::play_at(&mut self.commands, &self.bank, SfxKind::Crash, 0.9, at);
+        }
         fx::fireball(&mut self.commands, &self.fire, at, radius);
         let (kind, volume) = if radius > 5.0 {
             (SfxKind::BigBoom, 1.0)
@@ -1050,6 +1054,9 @@ pub fn update_bombs(
 /// Souffle des explosions : gravats réveillés, joueur projeté, secousse,
 /// réaction en chaîne.
 pub fn blast_effects(
+    mut commands: Commands,
+    bank: Res<SfxBank>,
+    mut game: ResMut<GameState>,
     mut blasts: MessageReader<Blast>,
     mut player: Query<(&Transform, &mut Body), With<Player>>,
     mut bombs: Query<(&Transform, &mut Bomb)>,
@@ -1064,6 +1071,11 @@ pub fn blast_effects(
             let center = transform.translation + Vec3::Y * 0.9;
             let d = center - blast.at;
             let dist = d.length();
+            // Explosion toute proche : acouphène et flash.
+            if dist < blast.radius * 3.0 + 3.0 {
+                fx::play(&mut commands, &bank, SfxKind::Ring, (1.0 - dist / (blast.radius * 3.0 + 3.0)).clamp(0.2, 0.8));
+                game.hurt_flash = game.hurt_flash.max(0.25);
+            }
             let reach = blast.radius * 2.4;
             if dist < reach {
                 // Projeté, mais pas en orbite : la poussée est plafonnée.

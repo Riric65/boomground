@@ -42,6 +42,19 @@ pub struct Rules {
     pub max_per_ip: usize,
     /// Rayon maximal d'une explosion, en multiple de celui de l'arme.
     pub explosion_scale: f32,
+    /// Le vol libre (touche V) est autorisé (sinon : bac à sable solo
+    /// seulement).
+    pub allow_fly: bool,
+    /// Chat textuel.
+    pub chat: bool,
+    /// Voix de proximité.
+    pub voice: bool,
+    /// Portée de la voix (mètres).
+    pub voice_range: f32,
+    /// Mots interdits dans le chat (remplacés par des étoiles).
+    pub chat_filter: Vec<String>,
+    /// Messages maximum par fenêtre de 8 secondes.
+    pub chat_burst: u32,
 }
 
 impl Default for Rules {
@@ -64,6 +77,12 @@ impl Default for Rules {
             anticheat: 1,
             max_per_ip: 4,
             explosion_scale: 1.0,
+            allow_fly: false,
+            chat: true,
+            voice: true,
+            voice_range: 35.0,
+            chat_filter: Vec::new(),
+            chat_burst: 5,
         }
     }
 }
@@ -95,7 +114,13 @@ idle_kick_minutes = 0
 # Niveau du journal : debug, info, warn, error.
 log_level = info
 
+# Message affiché dans la liste des serveurs.
+motd = Bienvenue sur BoomGround !
+
 # ---- Monde ---------------------------------------------------------------
+# Taille de la carte, en pâtés de maisons par côté (5 à 66). 33 = grande
+# ville (845 m), 17 = moyenne, 9 = petite. Plus petite = moins de mémoire.
+map_size = 33
 # Nom du monde : le fichier worlds/<nom>.bgw est chargé s'il existe, créé
 # sinon. Il contient TOUT (ville modifiée, débris, corps en chute, joueurs).
 world = world
@@ -138,6 +163,19 @@ starting_money = 0
 # Multiplicateur du rayon maximal des explosions (1 = valeurs du jeu).
 explosion_scale = 1.0
 
+# ---- Communication -------------------------------------------------------
+# Vol libre (touche V) : false = interdit en multijoueur (recommandé).
+allow_fly = false
+# Chat textuel (touche T) et voix de proximité (activée par défaut).
+chat = true
+voice = true
+# Portée de la voix, en mètres.
+voice_range = 35
+# Mots interdits dans le chat, séparés par des virgules (remplacés par ***).
+chat_filter =
+# Messages maximum par tranche de 8 secondes et par joueur.
+chat_burst = 5
+
 # ---- Anti-triche ---------------------------------------------------------
 # 0 = aucun contrôle de déplacement, 1 = normal, 2 = strict (expulse plus vite).
 anticheat = 1
@@ -150,6 +188,8 @@ pub struct ServerConf {
     pub seed: Option<u64>,
     pub mode: u8,
     pub world: String,
+    pub motd: String,
+    pub map_blocks: u16,
     pub rules: Rules,
     pub log_level: crate::net::logger::Level,
 }
@@ -174,6 +214,8 @@ pub fn load() -> ServerConf {
         seed: None,
         mode: 0,
         world: "world".into(),
+        motd: "Bienvenue sur BoomGround !".into(),
+        map_blocks: 33,
         rules: Rules::default(),
         log_level: crate::net::logger::Level::Info,
     };
@@ -209,6 +251,20 @@ pub fn load() -> ServerConf {
             }
             "mode" => conf.mode = u8::from(value.eq_ignore_ascii_case("normal")),
             "world" => conf.world = crate::net::save::file_stem(value),
+            "motd" => conf.motd = value.chars().take(80).collect(),
+            "map_size" => conf.map_blocks = value.parse().unwrap_or(33).clamp(5, 66),
+            "allow_fly" => r.allow_fly = flag(r.allow_fly),
+            "chat" => r.chat = flag(r.chat),
+            "voice" => r.voice = flag(r.voice),
+            "voice_range" => r.voice_range = value.parse::<f32>().unwrap_or(35.0).clamp(5.0, 150.0),
+            "chat_burst" => r.chat_burst = value.parse().unwrap_or(5).clamp(1, 30),
+            "chat_filter" => {
+                r.chat_filter = value
+                    .split(',')
+                    .map(|w| w.trim().to_lowercase())
+                    .filter(|w| !w.is_empty())
+                    .collect()
+            }
             "max_players" => r.max_players = value.parse().unwrap_or(r.max_players).clamp(1, MAX_PLAYERS),
             "max_per_ip" => r.max_per_ip = value.parse().unwrap_or(r.max_per_ip).clamp(1, 16),
             "idle_kick_minutes" => r.idle_kick = value.parse::<f32>().unwrap_or(0.0).clamp(0.0, 1440.0) * 60.0,

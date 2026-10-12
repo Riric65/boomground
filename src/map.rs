@@ -107,7 +107,8 @@ pub fn generate(w: &mut VoxelWorld, seed: u64) -> Vec3 {
             // et haut, banlieue de maisons et d'entrepôts.
             let cx = d.x / BLOCK / 2;
             let cz = d.z / BLOCK / 2;
-            let ring = (bx - cx).abs().max((bz - cz).abs());
+            // Les districts s'étirent avec la taille de la carte.
+            let ring = (bx - cx).abs().max((bz - cz).abs()) * 16 / (d.x / BLOCK / 2).max(1);
             lot(w, &mut rng, min, max, ring);
         }
     }

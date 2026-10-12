@@ -250,7 +250,7 @@ pub fn update(
         }
     }
 
-    let volume = Volume::Linear(settings.music * 0.45);
+    let volume = Volume::Linear(settings.music * 0.22);
     for mut sink in &mut sinks {
         sink.set_volume(volume);
     }

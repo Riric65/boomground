@@ -66,6 +66,12 @@ pub struct Lobby {
     pub hosting: Option<HostHandle>,
     /// Partie solo (serveur privé local) : le jeu peut la mettre en pause.
     pub solo: bool,
+    /// Infos du serveur reçues à l'entrée.
+    pub server_name: String,
+    pub max_players: u8,
+    pub allow_fly: bool,
+    pub chat: bool,
+    pub voice: bool,
 }
 
 impl Lobby {
@@ -314,7 +320,11 @@ pub fn receive(
     ragdolls: Query<(Entity, &crate::vitals::Ragdoll)>,
     mut fx_params: ReceiveExtras,
     mut loading: ResMut<WorldLoading>,
+    mut chat: ResMut<crate::chat::Chat>,
+    time: Res<Time>,
+    mut voice_in: ResMut<crate::voice::VoiceInbox>,
 ) {
+    let chat_time = time.elapsed_secs();
     let ReceiveExtras {
         ref mut mirror,
         ref mut net_blocks,
@@ -364,7 +374,18 @@ pub fn receive(
                 seed,
                 mode,
                 started,
+                map_blocks,
+                name,
+                max_players,
+                flags,
             } => {
+                d.game.multi = !lobby.solo;
+                d.game.fly_allowed = flags & 1 != 0;
+                lobby.server_name = name;
+                lobby.max_players = max_players;
+                lobby.allow_fly = flags & 1 != 0;
+                lobby.chat = flags & 2 != 0;
+                lobby.voice = flags & 4 != 0;
                 d.net.id = Some(id);
                 lobby.active = true;
                 lobby.started = started;
@@ -376,7 +397,7 @@ pub fn receive(
                 // Génération de la ville sans bloquer l'affichage.
                 let (tx, rx) = std::sync::mpsc::channel();
                 let _ = std::thread::Builder::new().name("boomground-ville".into()).spawn(move || {
-                    let mut w = crate::world::VoxelWorld::new();
+                    let mut w = crate::world::VoxelWorld::with_blocks(map_blocks as i32);
                     w.rebuild(seed);
                     let _ = tx.send(w);
                 });
@@ -511,11 +532,23 @@ pub fn receive(
                     mirror.fires.insert(cell, e);
                 }
             }
+            Packet::ChatMsg { from, name, text } => {
+                let line = if from == 0 { text } else { format!("<{name}> {text}") };
+                let now = chat_time;
+                chat.push(line, now, from == 0);
+            }
+            Packet::Voice { from, data, .. } => {
+                voice_in.push((from, data));
+            }
+            Packet::Driving { body } => {
+                d.game.driving = body;
+            }
             Packet::Reset { seed } => {
                 d.game.seed = seed;
+                let blocks = d.world.blocks;
                 let (tx, rx) = std::sync::mpsc::channel();
                 let _ = std::thread::Builder::new().name("boomground-ville".into()).spawn(move || {
-                    let mut w = crate::world::VoxelWorld::new();
+                    let mut w = crate::world::VoxelWorld::with_blocks(blocks);
                     w.rebuild(seed);
                     let _ = tx.send(w);
                 });
@@ -647,8 +680,11 @@ pub fn receive(
                 }
             }
             Packet::DoorState { door, open } => {
-                if let Some(door) = d.world.doors.get_mut(door as usize) {
+                let index = door as usize;
+                if let Some(door) = d.world.doors.get_mut(index) {
                     door.is_open = open;
+                    let at = d.world.doors[index].center(&d.world);
+                    crate::fx::play_at(&mut d.commands, &d.bank, crate::fx::SfxKind::Door, 0.8, at);
                 }
             }
             Packet::Hurt { hp, from } => {
@@ -707,6 +743,12 @@ pub fn receive(
             | Packet::Buy { .. }
             | Packet::Throw { .. }
             | Packet::Command { .. }
+            | Packet::Chat { .. }
+            | Packet::Status
+            | Packet::StatusInfo { .. }
+            | Packet::Drive { .. }
+            | Packet::Enter { .. }
+            | Packet::Exit
             | Packet::Ping => {}
         }
     }

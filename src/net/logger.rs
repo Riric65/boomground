@@ -63,7 +63,7 @@ pub fn log(level: Level, msg: &str) {
         Level::Error => "ERROR",
     };
     let line = format!("[{now}] [Server thread/{tag}]: {msg}");
-    println!("{line}");
+    crate::net::console::print(&line);
     if let Some(f) = FILE.lock().unwrap().as_mut() {
         let _ = writeln!(f, "{line}");
     }

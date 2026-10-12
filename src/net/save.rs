@@ -19,7 +19,7 @@ use bevy::prelude::*;
 use crate::sim::{R, W};
 
 const MAGIC: &[u8; 4] = b"BGW1";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 /// Données d'un joueur enregistrées avec le monde.
 #[derive(Clone, Debug, Default)]
@@ -41,6 +41,8 @@ pub struct SaveData {
     pub map_version: u32,
     pub seed: u64,
     pub mode: u8,
+    /// Côté de la carte, en pâtés de maisons.
+    pub map_blocks: u16,
     pub history: Vec<[u16; 4]>,
     pub doors_open: Vec<u32>,
     pub sim: Vec<u8>,
@@ -64,6 +66,7 @@ impl SaveData {
         w.u32(self.map_version);
         w.u64(self.seed);
         w.u8(self.mode);
+        w.u16(self.map_blocks);
         w.u64(self.saved_at);
         w.string(&self.name);
         w.u32(self.history.len() as u32);
@@ -109,13 +112,19 @@ impl SaveData {
         let bad = || "fichier incomplet".to_string();
         let mut r = R::new(&body[4..]);
         let format = r.u32().ok_or_else(bad)?;
-        if format != FORMAT {
+        if format != FORMAT && format != 1 {
             return Err(format!("format {format} non pris en charge"));
         }
+        let map_version = r.u32().ok_or_else(bad)?;
+        let seed = r.u64().ok_or_else(bad)?;
+        let mode = r.u8().ok_or_else(bad)?;
+        // Le format 1 n'avait que la grande carte.
+        let map_blocks = if format >= 2 { r.u16().ok_or_else(bad)? } else { 33 };
         let mut s = SaveData {
-            map_version: r.u32().ok_or_else(bad)?,
-            seed: r.u64().ok_or_else(bad)?,
-            mode: r.u8().ok_or_else(bad)?,
+            map_version,
+            seed,
+            mode,
+            map_blocks,
             saved_at: r.u64().ok_or_else(bad)?,
             name: r.string().ok_or_else(bad)?,
             ..Default::default()
@@ -216,6 +225,7 @@ mod tests {
             map_version: 2,
             seed: 12345,
             mode: 1,
+            map_blocks: 17,
             history: vec![[1, 2, 3, 255], [4, 5, 6, 8]],
             doors_open: vec![3, 9],
             sim: vec![1, 2, 3],

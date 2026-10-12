@@ -9,6 +9,7 @@
 
 pub mod client;
 pub mod conf;
+pub mod console;
 pub mod lan;
 pub mod logger;
 pub mod mirror;

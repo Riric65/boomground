@@ -221,7 +221,7 @@ pub fn lifecycle(
     mut head: Query<&mut Transform, (With<Head>, Without<Player>)>,
     ragdolls: Query<(Entity, &Ragdoll)>,
 ) {
-    if !game.in_game() {
+    if !game.simulating() {
         return;
     }
     let Ok((mut transform, mut body)) = player.single_mut() else {
@@ -310,4 +310,44 @@ pub fn death_camera(
     let look = Transform::from_translation(cam).looking_at(target, Vec3::Y);
     h.translation = rot_inv * (cam - pt.translation);
     h.rotation = rot_inv * look.rotation;
+}
+
+/// Retours de dégâts : rougeur d'écran, souffle coupé, battements de cœur
+/// quand les points de vie sont bas.
+pub fn feedback(
+    time: Res<Time>,
+    mut game: ResMut<GameState>,
+    bank: Res<crate::fx::SfxBank>,
+    mut shake: ResMut<crate::fx::Shake>,
+    mut commands: Commands,
+    mut last_hp: Local<f32>,
+    mut beat: Local<f32>,
+) {
+    let dt = time.delta_secs();
+    if !game.simulating() {
+        return;
+    }
+    if game.hp < *last_hp - 0.5 && game.hp < MAX_HP {
+        let lost = *last_hp - game.hp;
+        game.hurt_flash = (game.hurt_flash + 0.25 + lost / 60.0).min(1.0);
+        shake.add((lost / 90.0).min(0.6));
+        if lost > 12.0 {
+            crate::fx::play(&mut commands, &bank, crate::fx::SfxKind::Hurt, (0.5 + lost / 80.0).min(1.2));
+        }
+    }
+    if game.hp > *last_hp + 0.5 {
+        game.hurt_flash = 0.0;
+    }
+    *last_hp = game.hp;
+    game.hurt_flash = (game.hurt_flash - dt * 0.9).max(0.0);
+
+    // Cœur : plus vite et plus fort quand la vie baisse.
+    if !game.dead && game.hp < 40.0 {
+        *beat -= dt;
+        if *beat <= 0.0 {
+            let danger = 1.0 - game.hp / 40.0;
+            *beat = 1.1 - danger * 0.55;
+            crate::fx::play(&mut commands, &bank, crate::fx::SfxKind::Heartbeat, 0.4 + danger * 0.9);
+        }
+    }
 }

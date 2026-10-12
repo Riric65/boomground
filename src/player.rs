@@ -254,7 +254,7 @@ pub fn move_player(
     }
 
     // Vol libre : uniquement en bac à sable.
-    if keys.just_pressed(KeyCode::KeyV) && game.sandbox() {
+    if keys.just_pressed(KeyCode::KeyV) && game.sandbox() && game.fly_allowed && controls_open(&game, &shop) {
         body.fly = !body.fly;
         body.vel = Vec3::ZERO;
     }
@@ -267,7 +267,7 @@ pub fn move_player(
     let forward = Vec3::new(-body.yaw.sin(), 0.0, -body.yaw.cos());
     let right = Vec3::new(body.yaw.cos(), 0.0, -body.yaw.sin());
     let mut wish = Vec3::ZERO;
-    let controls = !shop.open;
+    let controls = !shop.open && game.phase == crate::game::Phase::Playing && !game.typing && game.driving == 0;
     if controls {
         if keys.any_pressed([KeyCode::KeyW, KeyCode::ArrowUp]) {
             wish += forward;
@@ -296,8 +296,22 @@ pub fn move_player(
         }
         let speed = if running { FLY * 2.0 } else { FLY };
         body.vel = v * speed;
-        pos += body.vel * dt;
-        pos.y = pos.y.clamp(-5.0, 80.0);
+        // Le vol respecte les murs, le sol et les limites de la carte.
+        let half = Vec3::new(HALF_W, HEIGHT * 0.5, HALF_W);
+        let mut center = pos + Vec3::Y * HEIGHT * 0.5;
+        for axis in [0, 2, 1] {
+            let delta = body.vel[axis] * dt;
+            if delta != 0.0 && world.sweep_with(&mut center, half, axis, delta, &[]) {
+                body.vel[axis] = 0.0;
+            }
+        }
+        let size = world.dims.as_vec3() * crate::world::VOXEL;
+        let lo = world.origin + Vec3::new(HALF_W + 0.6, 0.0, HALF_W + 0.6);
+        let hi = world.origin + Vec3::new(size.x - HALF_W - 0.6, 0.0, size.z - HALF_W - 0.6);
+        center.x = center.x.clamp(lo.x, hi.x);
+        center.z = center.z.clamp(lo.z, hi.z);
+        center.y = center.y.clamp(crate::world::VOXEL + HEIGHT * 0.5, 70.0);
+        pos = center - Vec3::Y * HEIGHT * 0.5;
         transform.translation = pos;
         body.grounded = false;
         return;
@@ -443,4 +457,9 @@ pub fn move_player(
         head.translation.y = EYE - body.land - body.step + (body.bob * 2.0).sin().abs() * 0.04 * intensity;
         head.translation.x = body.bob.sin() * 0.02 * intensity;
     }
+}
+
+/// Les touches de jeu sont actives (pas de boutique, pas de menu).
+fn controls_open(game: &crate::game::GameState, shop: &crate::shop::ShopState) -> bool {
+    !shop.open && game.phase == crate::game::Phase::Playing
 }

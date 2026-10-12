@@ -21,6 +21,11 @@ pub const VOXEL: f32 = 0.4;
 /// (33 × 33 pâtés de maisons, soit ~30 fois l'ancienne carte).
 pub const GRID: [i32; 3] = [2112, 64, 2112];
 
+/// Taille par défaut de la carte : 33 × 33 pâtés de maisons.
+pub const DEFAULT_BLOCKS: i32 = 33;
+/// Plus petite carte : 5 × 5 pâtés.
+pub const MIN_BLOCKS: i32 = 5;
+
 /// Côté d'un morceau de rendu, en cellules (voir `vmesh`).
 pub const MESH_CHUNK: i32 = 16;
 
@@ -118,6 +123,8 @@ impl Chunk {
 #[derive(Resource)]
 pub struct VoxelWorld {
     pub dims: IVec3,
+    /// Côté de la carte, en pâtés de maisons.
+    pub blocks: i32,
     /// Coin « bas » monde de la cellule (0, 0, 0).
     pub origin: Vec3,
     /// Nombre de morceaux par axe.
@@ -147,6 +154,8 @@ pub struct Door {
     pub closed: Vec<IVec3>,
     pub open: Vec<IVec3>,
     pub is_open: bool,
+    /// Nombre de voxels d'origine (une porte à moitié détruite ne bouge plus).
+    pub total: usize,
 }
 
 impl Door {
@@ -166,7 +175,13 @@ impl Default for VoxelWorld {
 
 impl VoxelWorld {
     pub fn new() -> Self {
-        let dims = IVec3::from(GRID);
+        Self::with_blocks(DEFAULT_BLOCKS)
+    }
+
+    /// Carte de `blocks` × `blocks` pâtés de maisons (64 voxels chacun).
+    pub fn with_blocks(blocks: i32) -> Self {
+        let blocks = blocks.clamp(MIN_BLOCKS, DEFAULT_BLOCKS * 2);
+        let dims = IVec3::new(blocks * 64, GRID[1], blocks * 64);
         let chunk_dims = dims / MESH_CHUNK;
         let count = (chunk_dims.x * chunk_dims.y * chunk_dims.z) as usize;
         let size = dims.as_vec3() * VOXEL;
@@ -175,6 +190,7 @@ impl VoxelWorld {
             origin: Vec3::new(-size.x * 0.5, 0.0, -size.z * 0.5),
             chunk_dims,
             chunks: (0..count).map(|_| None).collect(),
+            blocks,
             alive: 0,
             total: 0,
             seed: 0,
@@ -290,10 +306,12 @@ impl VoxelWorld {
         for (i, &c) in closed.iter().enumerate() {
             self.set(c, true, material(i));
         }
+        let total = closed.len();
         self.doors.push(Door {
             closed,
             open,
             is_open: false,
+            total,
         });
     }
 
@@ -307,6 +325,11 @@ impl VoxelWorld {
         } else {
             (door.closed.clone(), door.open.clone())
         };
+        // Cassée : trop de voxels manquent, elle ne se manœuvre plus.
+        let present = from.iter().filter(|&&c| self.is_solid(c)).count();
+        if present * 4 < door.total * 3 {
+            return None;
+        }
         if from
             .iter()
             .zip(&to)
@@ -1185,6 +1208,9 @@ pub fn build_level(mut world: ResMut<VoxelWorld>, mut game: ResMut<crate::game::
     if game.seed == 0 {
         game.seed = crate::game::random_seed();
     }
+    // Décor des menus : une petite ville (la vraie est construite à l'entrée
+    // en partie). Économise ~150 Mo de mémoire.
+    *world = VoxelWorld::with_blocks(7);
     world.rebuild(game.seed);
 }
 

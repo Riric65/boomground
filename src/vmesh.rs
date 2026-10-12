@@ -20,6 +20,7 @@ use crate::world::{mat, palette_linear, VoxelAssets, VoxelWorld, MESH_CHUNK, VOX
 pub const CHUNK: i32 = MESH_CHUNK;
 
 /// Nombre maximal de morceaux reconstruits par frame.
+#[allow(dead_code)]
 const BUDGET: usize = 40;
 
 /// Marque l'entité qui porte le maillage d'un morceau.
@@ -41,6 +42,10 @@ pub struct ChunkEntities {
     /// Morceaux proches (≤ 70 m) pas encore maillés : sert à l'écran de
     /// chargement.
     pub pending_near: usize,
+    /// Morceaux à mailler dans la distance d'affichage.
+    pub pending_all: usize,
+    /// Le premier balayage de la carte a eu lieu.
+    pub scanned: bool,
 }
 
 /// Attributs compacts : 24 octets par sommet au lieu de 48. Les identifiants
@@ -432,6 +437,7 @@ pub fn refresh_chunks(
     all: Query<Entity, With<VoxelMesh>>,
     assets: Res<VoxelAssets>,
     settings: Res<crate::game::Settings>,
+    game: Res<crate::game::GameState>,
     camera: Query<&GlobalTransform, With<crate::player::WorldCamera>>,
     mut scan_timer: Local<f32>,
 ) {
@@ -443,6 +449,7 @@ pub fn refresh_chunks(
         world.full_rebuild = false;
         world.dirty_chunks_mut().clear();
         *scan_timer = 0.0;
+        chunks.scanned = false;
     }
 
     let eye = camera
@@ -497,6 +504,7 @@ pub fn refresh_chunks(
                 }
             }
         }
+        chunks.scanned = true;
     }
 
     // File d'attente : ce qui est trop loin est abandonné.
@@ -509,30 +517,37 @@ pub fn refresh_chunks(
         .iter()
         .filter(|k| center_of(**k).distance(eye) <= 70.0)
         .count();
+    chunks.pending_all = world.dirty_chunks_mut().len();
     if world.dirty_chunks_mut().is_empty() {
         return;
     }
 
-    // Les morceaux les plus proches de la caméra d'abord.
+    // Les morceaux les plus proches de la caméra d'abord, dans une
+    // enveloppe de temps par image : pendant le chargement on y va franchement
+    // (l'écran de chargement masque tout), ensuite 4 ms pour garder la
+    // fluidité.
     let mut keys: Vec<IVec3> = world.dirty_chunks_mut().iter().copied().collect();
     let dist = |k: &IVec3| center_of(*k).distance_squared(eye);
-    // Gros chantier (chargement de la carte) : budget élargi.
-    let budget = if keys.len() > 400 { BUDGET * 4 } else { BUDGET };
-    if keys.len() > budget {
-        keys.select_nth_unstable_by(budget, |a, b| dist(a).total_cmp(&dist(b)));
-        keys.truncate(budget);
+    let take = if game.loading { 400 } else { 64 };
+    if keys.len() > take {
+        keys.select_nth_unstable_by(take, |a, b| dist(a).total_cmp(&dist(b)));
+        keys.truncate(take);
     }
-    for key in &keys {
-        world.dirty_chunks_mut().remove(key);
-    }
-
+    keys.sort_by(|a, b| dist(a).total_cmp(&dist(b)));
+    let budget = std::time::Duration::from_micros(if game.loading { 45_000 } else { 4_000 });
+    let started = std::time::Instant::now();
     let n = world.dims / CHUNK;
     for key in keys {
-        if key.cmplt(IVec3::ZERO).any() || key.cmpge(n).any() {
-            continue;
+        // Au moins un morceau par image, puis on respecte le budget.
+        world.dirty_chunks_mut().remove(&key);
+        if !(key.cmplt(IVec3::ZERO).any() || key.cmpge(n).any()) {
+            rebuild_chunk(key, &world, &mut chunks, &mut commands, &mut meshes, &mut existing, &assets);
         }
-        rebuild_chunk(key, &world, &mut chunks, &mut commands, &mut meshes, &mut existing, &assets);
+        if started.elapsed() > budget {
+            break;
+        }
     }
+    chunks.pending_all = world.dirty_chunks_mut().len();
 }
 
 #[cfg(test)]

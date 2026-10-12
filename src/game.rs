@@ -480,6 +480,16 @@ pub struct GameState {
     /// Chargement de la ville en cours (écran de chargement).
     pub loading: bool,
     pub loading_progress: f32,
+    /// Partie multijoueur en cours (le monde continue pendant la pause).
+    pub multi: bool,
+    /// Le serveur autorise le vol libre.
+    pub fly_allowed: bool,
+    /// Rouge à l'écran après un coup (0..1), pour l'effet de dégâts.
+    pub hurt_flash: f32,
+    /// Le joueur écrit dans le chat : les touches de jeu sont suspendues.
+    pub typing: bool,
+    /// Corps rigide du véhicule conduit (0 = à pied).
+    pub driving: u32,
 }
 
 impl Default for GameState {
@@ -504,6 +514,11 @@ impl Default for GameState {
             world_name: String::new(),
             loading: false,
             loading_progress: 0.0,
+            multi: false,
+            fly_allowed: true,
+            hurt_flash: 0.0,
+            typing: false,
+            driving: 0,
         };
         s.reset_inventory();
         s
@@ -520,9 +535,15 @@ impl GameState {
         self.phase == Phase::Playing
     }
 
+    /// La simulation locale tourne : en jeu, ou en multijoueur même avec le
+    /// menu pause ouvert (le monde ne s'arrête pas pour les autres).
+    pub fn simulating(&self) -> bool {
+        self.phase == Phase::Playing || (self.started && self.multi && self.phase == Phase::Menu)
+    }
+
     /// En jeu et vivant : peut agir.
     pub fn alive(&self) -> bool {
-        self.phase == Phase::Playing && !self.dead && !self.loading
+        self.phase == Phase::Playing && !self.dead && !self.loading && !self.typing
     }
 
     /// Matériau actuel de l'outil de construction.
@@ -727,7 +748,7 @@ impl Default for Settings {
             msaa: 2,
             bloom: false,
             particles: 1,
-            music: 0.5,
+            music: 0.4,
         }
     }
 }
@@ -872,6 +893,12 @@ pub fn load_settings() -> Settings {
 /// Condition de système : on ne joue pas tant qu'on est dans le menu.
 pub fn in_game(state: Res<GameState>) -> bool {
     state.phase == Phase::Playing
+}
+
+/// Condition de système : la simulation continue (y compris menu pause en
+/// multijoueur).
+pub fn simulating(state: Res<GameState>) -> bool {
+    state.simulating()
 }
 
 /// Seed aléatoire courte (lisible et facile à partager).

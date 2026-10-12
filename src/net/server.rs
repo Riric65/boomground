@@ -64,6 +64,9 @@ pub struct HostConfig {
     pub solo: bool,
     /// Nom du monde (fichier `.bgw`).
     pub world_name: String,
+    /// Côté de la carte (pâtés de maisons).
+    pub map_blocks: u16,
+    pub motd: String,
     /// Dossier des sauvegardes.
     pub save_dir: PathBuf,
     /// Sauvegarde à charger.
@@ -173,6 +176,15 @@ struct Client {
     last_notice: Instant,
     /// Déplacement forcé en cours : position visée et date.
     teleporting: Option<(Vec3, Instant)>,
+    /// Chat : dates des derniers messages, dernier texte.
+    chat_times: std::collections::VecDeque<Instant>,
+    last_chat: String,
+    last_chat_at: Instant,
+    /// Voix : seau de jetons (trames de 20 ms).
+    voice_tokens: f32,
+    voice_refill: Instant,
+    /// Connexion de simple consultation : fermée après la réponse.
+    close_after: bool,
 }
 
 impl Client {
@@ -215,6 +227,8 @@ struct ServerState {
     /// Joueurs connus (rechargés avec le monde, mis à jour à leur départ).
     players: BTreeMap<String, PlayerSave>,
     banned: Vec<String>,
+    /// Joueurs réduits au silence (pseudo en minuscules).
+    muted: Vec<String>,
     rejections: u32,
     last_snapshot: f32,
     last_sim: Instant,
@@ -349,6 +363,12 @@ fn new_client(stream: TcpStream, addr: IpAddr, rules: &Rules, mode: u8) -> Clien
         last_crush: now,
         last_notice: now - Duration::from_secs(10),
         teleporting: None,
+        chat_times: std::collections::VecDeque::new(),
+        last_chat: String::new(),
+        last_chat_at: now - Duration::from_secs(10),
+        voice_tokens: 100.0,
+        voice_refill: now,
+        close_after: false,
     }
 }
 
@@ -365,8 +385,8 @@ fn server_app(
     shutdown: Arc<AtomicBool>,
     console: Option<mpsc::Receiver<String>>,
 ) -> Result<App, String> {
-    let mut world = VoxelWorld::new();
     let mut sim = Sim::new();
+    let mut world = VoxelWorld::with_blocks(config.map_blocks as i32);
     let mut history = Vec::new();
     let mut players = BTreeMap::new();
     let mut config = config;
@@ -382,6 +402,8 @@ fn server_app(
         }
         config.seed = data.seed;
         config.mode = data.mode;
+        config.map_blocks = data.map_blocks;
+        world = VoxelWorld::with_blocks(data.map_blocks as i32);
         world.rebuild(data.seed);
         for e in &data.history {
             let c = IVec3::new(e[0] as i32, e[1] as i32, e[2] as i32);
@@ -434,6 +456,7 @@ fn server_app(
         history,
         players,
         banned: read_banned(),
+        muted: Vec::new(),
         rejections: 0,
         last_snapshot: 0.0,
         last_sim: now,
@@ -451,26 +474,6 @@ fn server_app(
     })
     .add_systems(Update, (stop_if_asked, accept_clients, serve).chain());
     Ok(app)
-}
-
-/// Lit les commandes tapées dans la console du serveur dédié.
-fn spawn_console() -> mpsc::Receiver<String> {
-    let (tx, rx) = mpsc::channel();
-    let _ = std::thread::Builder::new().name("boomground-console".into()).spawn(move || {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match std::io::stdin().read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    if tx.send(line.trim().to_string()).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    rx
 }
 
 /// Serveur dédié (`boomground-server`, ou `BoomGround --server`). Les
@@ -532,14 +535,17 @@ pub fn run_dedicated() {
         dedicated: true,
         solo: false,
         world_name: conf.world,
+        map_blocks: conf.map_blocks,
+        motd: conf.motd,
         save_dir,
         load,
     };
-    let app = server_app(listeners, port, config, Arc::new(AtomicBool::new(false)), Some(spawn_console()));
+    let app = server_app(listeners, port, config, Arc::new(AtomicBool::new(false)), Some(crate::net::console::start()));
     match app {
         Ok(mut app) => {
             logger::info(format!("Prêt : écoute sur le port {port}. Tape « help » pour les commandes."));
             app.run();
+            crate::net::console::stop();
             logger::info("Serveur arrêté.");
         }
         Err(e) => {
@@ -559,6 +565,8 @@ pub struct BackgroundOptions {
     /// Monde à charger.
     pub load: Option<PathBuf>,
     pub world_name: String,
+    /// Côté de la carte, en pâtés de maisons.
+    pub map_blocks: u16,
 }
 
 /// Crée un serveur en fond : lobby (réseau local + UPnP) ou solo (privé).
@@ -585,6 +593,8 @@ pub fn host_in_background(opts: BackgroundOptions) -> Result<HostHandle, String>
         dedicated: false,
         solo: opts.solo,
         world_name: opts.world_name,
+        map_blocks: opts.map_blocks,
+        motd: String::new(),
         save_dir,
         load: opts.load,
     };
@@ -1037,7 +1047,10 @@ fn hurt(
             (Some(k), false) => format!("{victim_name} a été tué par {k} ({cause})"),
             (None, _) => format!("{victim_name} est mort ({cause})"),
         };
-        logger::info(line);
+        logger::info(&line);
+        if server.config.rules.chat && !server.config.solo {
+            broadcast(server, None, &Packet::ChatMsg { from: 0, name: String::new(), text: line });
+        }
         broadcast(server, None, &Packet::Died { id: victim, at, push });
     }
 }
@@ -1211,6 +1224,7 @@ fn save_world(server: &mut ServerState, name: Option<&str>) -> Result<PathBuf, S
         map_version: crate::map::MAP_VERSION,
         seed: server.world.seed,
         mode: server.config.mode,
+        map_blocks: server.config.map_blocks,
         history: server.history.clone(),
         doors_open: server
             .world
@@ -1479,6 +1493,12 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
             }
         }
     }
+    // Consultations de la liste des serveurs : fermées une fois répondues.
+    for (&id, c) in server.clients.iter() {
+        if c.close_after && c.outbox.is_empty() {
+            gone.push(id);
+        }
+    }
     gone.sort_unstable();
     gone.dedup();
     for id in gone {
@@ -1586,6 +1606,18 @@ fn console_command(server: &mut ServerState, line: &str) {
                 None if cmd == "kick" => logger::warn(format!("joueur « {arg} » introuvable")),
                 None => {}
             }
+        }
+        "mute" => {
+            let lower = arg.to_lowercase();
+            if !lower.is_empty() && !server.muted.contains(&lower) {
+                server.muted.push(lower);
+            }
+            logger::info(format!("{arg} est réduit au silence"));
+        }
+        "unmute" => {
+            let lower = arg.to_lowercase();
+            server.muted.retain(|m| *m != lower);
+            logger::info(format!("{arg} peut de nouveau parler"));
         }
         "pardon" => {
             let lower = arg.to_lowercase();
@@ -1720,6 +1752,8 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
                 let open = server.world.doors[index].is_open;
                 broadcast_placed(server, &edits);
                 broadcast(server, None, &Packet::DoorState { door, open });
+            } else {
+                notice(server, id, "La porte est cassée ou bloquée.");
             }
         }
         Packet::BombPlaced { at, weapon } => {
@@ -1806,12 +1840,133 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
             }
         }
         Packet::Command { text } => handle_command(server, id, &text),
+        Packet::Status => {
+            let r = &server.config.rules;
+            let info = Packet::StatusInfo {
+                name: server.config.name.clone(),
+                players: server.clients.values().filter(|c| c.joined).count().min(255) as u8,
+                max: r.max_players.min(MAX_PLAYERS) as u8,
+                mode: server.config.mode,
+                version: PROTOCOL_VERSION,
+                motd: server.config.motd.clone(),
+            };
+            if let Some(c) = server.clients.get_mut(&id) {
+                if !c.joined {
+                    c.queue(&info.encode());
+                    c.close_after = true;
+                }
+            }
+        }
+        Packet::Chat { text } => handle_chat(server, id, text),
+        Packet::Voice { seq, data, .. } => handle_voice(server, id, seq, data),
         Packet::Ping => {
             if let Some(c) = server.clients.get_mut(&id) {
                 c.last_activity = Instant::now();
             }
         }
         _ => {}
+    }
+}
+
+/// Remplace les mots interdits par des étoiles (sans tenir compte de la
+/// casse).
+fn filter_text(text: &str, words: &[String]) -> String {
+    let mut out = text.to_string();
+    for w in words {
+        let mut lower = out.to_lowercase();
+        // Les accents ne changent pas la longueur en octets pour ces
+        // comparaisons simples : on se limite aux correspondances sûres.
+        while let Some(i) = lower.find(w.as_str()) {
+            if out.is_char_boundary(i) && out.is_char_boundary(i + w.len()) && out.len() == lower.len() {
+                out.replace_range(i..i + w.len(), &"*".repeat(w.chars().count()));
+                lower.replace_range(i..i + w.len(), &"*".repeat(w.chars().count()));
+            } else {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Chat : nettoyage, limite de débit, anti-répétition, mots interdits.
+fn handle_chat(server: &mut ServerState, id: u16, text: String) {
+    let rules = server.config.rules.clone();
+    if !rules.chat || server.config.solo {
+        return;
+    }
+    let name = name_of(server, id);
+    let muted = server.muted.contains(&name.to_lowercase());
+    let Some(c) = server.clients.get_mut(&id) else { return };
+    if !c.joined {
+        return;
+    }
+    let now = Instant::now();
+    let clean: String = text
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(200)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if clean.is_empty() {
+        return;
+    }
+    c.last_activity = now;
+    if muted {
+        c.queue(&Packet::ChatMsg { from: 0, name: String::new(), text: "Tu es réduit au silence.".into() }.encode());
+        return;
+    }
+    // Débit : `chat_burst` messages par fenêtre de 8 s.
+    while c.chat_times.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(8)) {
+        c.chat_times.pop_front();
+    }
+    if c.chat_times.len() as u32 >= rules.chat_burst {
+        c.queue(&Packet::ChatMsg { from: 0, name: String::new(), text: "Doucement ! Trop de messages.".into() }.encode());
+        return;
+    }
+    // Pas deux fois le même message en moins de 4 s.
+    if clean.eq_ignore_ascii_case(&c.last_chat) && now.duration_since(c.last_chat_at) < Duration::from_secs(4) {
+        return;
+    }
+    c.chat_times.push_back(now);
+    c.last_chat = clean.clone();
+    c.last_chat_at = now;
+    let shown = filter_text(&clean, &rules.chat_filter);
+    if shown != clean {
+        logger::debug(format!("{name} : message filtré"));
+    }
+    logger::info(format!("<{name}> {shown}"));
+    broadcast(server, None, &Packet::ChatMsg { from: id, name, text: shown });
+}
+
+/// Voix de proximité : relayée aux joueurs à portée.
+fn handle_voice(server: &mut ServerState, id: u16, seq: u16, data: Vec<u8>) {
+    let rules = server.config.rules.clone();
+    if !rules.voice || server.config.solo || data.is_empty() || data.len() > 700 {
+        return;
+    }
+    let name = name_of(server, id);
+    let muted = server.muted.contains(&name.to_lowercase());
+    let now = Instant::now();
+    let Some(c) = server.clients.get_mut(&id) else { return };
+    if !c.joined || !c.placed || c.dead_until.is_some() || muted {
+        return;
+    }
+    // Seau de jetons : ~60 trames par seconde au maximum.
+    let dt = now.duration_since(c.voice_refill).as_secs_f32();
+    c.voice_refill = now;
+    c.voice_tokens = (c.voice_tokens + dt * 60.0).min(100.0);
+    if c.voice_tokens < 1.0 {
+        return;
+    }
+    c.voice_tokens -= 1.0;
+    c.last_activity = now;
+    let (from_pos, range) = (c.pos, rules.voice_range);
+    let packet = Packet::Voice { from: id, seq, data }.encode();
+    for (&other, client) in server.clients.iter_mut() {
+        if other != id && client.joined && client.dead_until.is_none() && client.pos.distance(from_pos) <= range {
+            client.queue(&packet);
+        }
     }
 }
 
@@ -1862,11 +2017,19 @@ fn handle_join(server: &mut ServerState, id: u16, name: String, token: u64, vers
         server.host = Some(id);
     }
 
+    let r = &server.config.rules;
+    let flags = (r.allow_fly || server.config.solo) as u8
+        | ((r.chat && !server.config.solo) as u8) << 1
+        | ((r.voice && !server.config.solo) as u8) << 2;
     let welcome = Packet::Welcome {
         id,
         seed: server.world.seed,
         mode: server.config.mode,
         started: server.started,
+        map_blocks: server.config.map_blocks,
+        name: server.config.name.clone(),
+        max_players: r.max_players.min(MAX_PLAYERS) as u8,
+        flags,
     };
     // État du monde : modifications, gravats, corps, portes.
     let mut stream: Vec<Vec<u8>> = vec![welcome.encode()];
@@ -1939,12 +2102,14 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
     }
     let level = server.config.rules.anticheat;
     let sandbox = server.config.mode == 0;
+    // Vol libre : bac à sable ET autorisé par les règles (ou solo).
+    let fly_ok = sandbox && (server.config.rules.allow_fly || server.config.solo);
     let now = Instant::now();
     let in_bounds = {
         let d = server.world.dims;
         let o = server.world.origin;
         let size = d.as_vec3() * crate::world::VOXEL;
-        pos.x > o.x - 2.0 && pos.x < o.x + size.x + 2.0 && pos.z > o.z - 2.0 && pos.z < o.z + size.z + 2.0 && pos.y > -30.0 && pos.y < 200.0
+        pos.x > o.x - 2.0 && pos.x < o.x + size.x + 2.0 && pos.z > o.z - 2.0 && pos.z < o.z + size.z + 2.0 && pos.y > 0.3 && pos.y < 120.0
     };
     let Some(c) = server.clients.get_mut(&id) else { return };
     if c.dead_until.is_some() || !c.joined {
@@ -1988,10 +2153,13 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
     }
     let grace = now < c.grace_until;
     let strict = level >= 2;
+    // Les états arrivent en rafales (TCP) : on ne compte jamais moins de
+    // 100 ms, sinon un vol rapide serait pris pour de la triche.
+    let dt = dt.max(0.1);
     let max_h = if grace {
         45.0
-    } else if sandbox {
-        17.0
+    } else if fly_ok {
+        34.0
     } else if strict {
         9.5
     } else {
@@ -1999,8 +2167,8 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
     };
     let max_up = if grace {
         30.0
-    } else if sandbox {
-        17.0
+    } else if fly_ok {
+        34.0
     } else {
         12.0
     };
@@ -2048,7 +2216,7 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
     } else if vy > -1.0 {
         // En l'air sans tomber : saut (court) ou vol.
         let since = *c.airborne_since.get_or_insert(now);
-        if !sandbox && level > 0 && since.elapsed() > Duration::from_millis(2200) && now >= c.grace_until {
+        if !fly_ok && level > 0 && since.elapsed() > Duration::from_millis(2200) && now >= c.grace_until {
             c.airborne_since = Some(now);
             suspect(server, id, 6.0, "vol");
             return;
@@ -2329,6 +2497,8 @@ mod tests {
             dedicated: false,
             solo: true,
             world_name: "essai".into(),
+            map_blocks: 9,
+            motd: String::new(),
             save_dir: dir,
             load,
         }

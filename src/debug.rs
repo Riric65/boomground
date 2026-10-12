@@ -171,7 +171,7 @@ pub fn force_playing(
     // Par défaut le test passe par le serveur privé du solo, comme le jeu.
     // `BOOM_OFFLINE=1` : ancien chemin, sans serveur.
     if !env("BOOM_OFFLINE") {
-        match crate::menu::launch_solo(&mut net, &mut lobby, &mut game, &name, &seed, mode, None) {
+        match crate::menu::launch_solo(&mut net, &mut lobby, &mut game, &name, &seed, mode, None, 17) {
             Ok(_) => {
                 if env("BOOM_SHOP") {
                     shop.open = true;

@@ -229,6 +229,7 @@ pub fn field(font: &UiFont, width: Val, value: &str, placeholder: &str, max: usi
 /// Focus au clic, saisie au clavier, rendu du texte et du curseur.
 pub fn text_fields(
     time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut keyboard: MessageReader<KeyboardInput>,
     clicked: Query<Entity, (With<TextField>, Added<Pressed>)>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -248,8 +249,29 @@ pub fn text_fields(
 
     let events: Vec<KeyboardInput> = keyboard.read().cloned().collect();
     let blink = (time.elapsed_secs() * 2.0) as u32 % 2 == 0;
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight]);
     for (_, mut field, mut border, children) in &mut fields {
         if field.focused {
+            // Copier / coller / couper.
+            if ctrl && keys.just_pressed(KeyCode::KeyV) {
+                if let Some(text) = crate::clipboard::get() {
+                    for c in text.chars() {
+                        if !c.is_control() && field.value.chars().count() < field.max {
+                            field.value.push(c);
+                        }
+                    }
+                }
+            }
+            if ctrl && keys.just_pressed(KeyCode::KeyC) {
+                crate::clipboard::set(&field.value);
+            }
+            if ctrl && keys.just_pressed(KeyCode::KeyX) {
+                crate::clipboard::set(&field.value);
+                field.value.clear();
+            }
+            if ctrl && keys.just_pressed(KeyCode::KeyA) {
+                field.value.clear();
+            }
             for ev in &events {
                 if ev.state != ButtonState::Pressed {
                     continue;
@@ -260,6 +282,9 @@ pub fn text_fields(
                     }
                     Key::Enter | Key::Escape | Key::Tab => field.focused = false,
                     _ => {
+                        if ctrl {
+                            continue;
+                        }
                         if let Some(text) = ev.text.as_ref() {
                             for c in text.chars() {
                                 if !c.is_control() && field.value.chars().count() < field.max {

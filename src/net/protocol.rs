@@ -19,7 +19,7 @@ pub const DEFAULT_PORT: u16 = 28431;
 pub const DISCOVERY_PORT: u16 = 28432;
 /// Version du protocole : deux versions différentes refusent de jouer
 /// ensemble (message clair plutôt que des paquets incompréhensibles).
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 /// Nombre maximal de joueurs dans une partie.
 pub const MAX_PLAYERS: usize = 16;
 
@@ -35,6 +35,13 @@ pub enum Packet {
         seed: u64,
         mode: u8,
         started: bool,
+        /// Côté de la carte, en pâtés de maisons de 64 voxels.
+        map_blocks: u16,
+        /// Nom du serveur et capacité.
+        name: String,
+        max_players: u8,
+        /// Bit 0 vol autorisé, bit 1 chat, bit 2 voix de proximité.
+        flags: u8,
     },
     /// Serveur → client : entrée refusée (version, partie pleine…).
     Refused { reason: String },
@@ -138,6 +145,32 @@ pub enum Packet {
     Ping,
     /// Serveur → clients : voxels qui prennent feu / s'éteignent.
     Fire { add: Vec<[u16; 3]>, remove: Vec<[u16; 3]> },
+    /// Client → serveur : message de chat.
+    Chat { text: String },
+    /// Serveur → clients : message de chat (`from` 0 = serveur).
+    ChatMsg { from: u16, name: String, text: String },
+    /// Voix de proximité (µ-law 8 bits, 16 kHz, 20 ms par trame). Client →
+    /// serveur (`from` ignoré), puis serveur → auditeurs proches.
+    Voice { from: u16, seq: u16, data: Vec<u8> },
+    /// Client → serveur (sans `Join`) : demande l'état du serveur.
+    Status,
+    /// Serveur → client : réponse à `Status`.
+    StatusInfo {
+        name: String,
+        players: u8,
+        max: u8,
+        mode: u8,
+        version: u16,
+        motd: String,
+    },
+    /// Client → serveur : commandes du véhicule conduit.
+    Drive { throttle: i8, steer: i8, brake: bool },
+    /// Client → serveur : monter dans le véhicule `car`.
+    Enter { car: u16 },
+    /// Client → serveur : quitter le véhicule.
+    Exit,
+    /// Serveur → client : corps conduit (0 = aucun).
+    Driving { body: u32 },
 }
 
 /// Un bloc de gravats annoncé aux clients.
@@ -231,12 +264,20 @@ impl Packet {
                 seed,
                 mode,
                 started,
+                map_blocks,
+                name,
+                max_players,
+                flags,
             } => {
                 w.u8(1);
                 w.u16(*id);
                 w.u64(*seed);
                 w.u8(*mode);
                 w.u8(*started as u8);
+                w.u16(*map_blocks);
+                w.string(name);
+                w.u8(*max_players);
+                w.u8(*flags);
             }
             Packet::State {
                 pos,
@@ -465,6 +506,55 @@ impl Packet {
                 w.u64(*seed);
             }
             Packet::Ping => w.u8(35),
+            Packet::Chat { text } => {
+                w.u8(37);
+                w.string(text);
+            }
+            Packet::ChatMsg { from, name, text } => {
+                w.u8(38);
+                w.u16(*from);
+                w.string(name);
+                w.string(text);
+            }
+            Packet::Voice { from, seq, data } => {
+                w.u8(39);
+                w.u16(*from);
+                w.u16(*seq);
+                w.u16(data.len() as u16);
+                w.0.extend_from_slice(data);
+            }
+            Packet::Status => w.u8(40),
+            Packet::StatusInfo {
+                name,
+                players,
+                max,
+                mode,
+                version,
+                motd,
+            } => {
+                w.u8(41);
+                w.string(name);
+                w.u8(*players);
+                w.u8(*max);
+                w.u8(*mode);
+                w.u16(*version);
+                w.string(motd);
+            }
+            Packet::Drive { throttle, steer, brake } => {
+                w.u8(42);
+                w.u8(*throttle as u8);
+                w.u8(*steer as u8);
+                w.u8(*brake as u8);
+            }
+            Packet::Enter { car } => {
+                w.u8(43);
+                w.u16(*car);
+            }
+            Packet::Exit => w.u8(44),
+            Packet::Driving { body } => {
+                w.u8(45);
+                w.u32(*body);
+            }
             Packet::Fire { add, remove } => {
                 w.u8(36);
                 for list in [add, remove] {
@@ -499,6 +589,10 @@ impl Packet {
                 seed: cur.u64()?,
                 mode: cur.u8()?,
                 started: cur.u8()? != 0,
+                map_blocks: cur.u16()?,
+                name: cur.string()?,
+                max_players: cur.u8()?,
+                flags: cur.u8()?,
             },
             2 => Packet::State {
                 pos: cur.vec3()?,
@@ -664,6 +758,39 @@ impl Packet {
             33 => Packet::Command { text: cur.string()? },
             34 => Packet::Reset { seed: cur.u64()? },
             35 => Packet::Ping,
+            37 => Packet::Chat { text: cur.string()? },
+            38 => Packet::ChatMsg {
+                from: cur.u16()?,
+                name: cur.string()?,
+                text: cur.string()?,
+            },
+            39 => {
+                let from = cur.u16()?;
+                let seq = cur.u16()?;
+                let n = cur.u16()? as usize;
+                Packet::Voice {
+                    from,
+                    seq,
+                    data: cur.take(n)?.to_vec(),
+                }
+            }
+            40 => Packet::Status,
+            41 => Packet::StatusInfo {
+                name: cur.string()?,
+                players: cur.u8()?,
+                max: cur.u8()?,
+                mode: cur.u8()?,
+                version: cur.u16()?,
+                motd: cur.string()?,
+            },
+            42 => Packet::Drive {
+                throttle: cur.u8()? as i8,
+                steer: cur.u8()? as i8,
+                brake: cur.u8()? != 0,
+            },
+            43 => Packet::Enter { car: cur.u16()? },
+            44 => Packet::Exit,
+            45 => Packet::Driving { body: cur.u32()? },
             36 => {
                 let mut lists: [Vec<[u16; 3]>; 2] = [Vec::new(), Vec::new()];
                 for list in lists.iter_mut() {
@@ -868,7 +995,20 @@ mod tests {
                 seed: 123_456_789,
                 mode: 1,
                 started: true,
+                map_blocks: 17,
+                name: "Serveur".into(),
+                max_players: 16,
+                flags: 5,
             },
+            Packet::Chat { text: "salut".into() },
+            Packet::ChatMsg { from: 2, name: "Sam".into(), text: "yo".into() },
+            Packet::Voice { from: 1, seq: 9, data: vec![1, 2, 3] },
+            Packet::Status,
+            Packet::StatusInfo { name: "S".into(), players: 2, max: 16, mode: 0, version: 5, motd: "hi".into() },
+            Packet::Drive { throttle: -1, steer: 1, brake: true },
+            Packet::Enter { car: 4 },
+            Packet::Exit,
+            Packet::Driving { body: 77 },
             Packet::Refused { reason: "pleine".into() },
             Packet::Roster {
                 host: 1,
