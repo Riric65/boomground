@@ -67,15 +67,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
       - name: NDK et SDK
         run: |
-          sdkmanager --install "ndk;26.1.10909125" "platforms;android-34" "build-tools;36.1.0"
+          # SDK préinstallé sur le runner (l'action setup-android échoue :
+          # elle installe le paquet « tools », retiré par Google).
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;26.1.10909125" "platforms;android-34" "build-tools;36.1.0"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
           echo "sdk.dir=$ANDROID_HOME" > android/local.properties
 
