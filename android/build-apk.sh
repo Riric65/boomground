@@ -19,9 +19,9 @@ for pair in "${TARGETS[@]}"; do
     echo "==> Compilation $abi ($triple)"
     # `--crate-type cdylib` uniquement ici : le bureau n'a pas à produire
     # de bibliothèque partagée en plus de l'exécutable.
-    cargo ndk -t "$abi" --platform 26 rustc --lib --release --crate-type cdylib
+    cargo ndk -t "$abi" --platform 26 rustc --lib --profile android --crate-type cdylib
     mkdir -p "$OUT/$abi"
-    cp "target/$triple/release/libboomground.so" "$OUT/$abi/libboomground.so"
+    cp "target/$triple/android/libboomground.so" "$OUT/$abi/libboomground.so"
 done
 
 ls -lh "$OUT"/*/libboomground.so

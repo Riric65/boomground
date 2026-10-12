@@ -50,3 +50,11 @@ bevy = { version = "0.20", features = ["android-native-activity"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+# APK : on vise la taille (téléchargement, mémoire du téléphone) plutôt que
+# les derniers pourcents de vitesse.
+[profile.android]
+inherits = "release"
+opt-level = "s"
+# LTO « thin » : le « fat » dépasse la mémoire d'une machine modeste.
+lto = "thin"

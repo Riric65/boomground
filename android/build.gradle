@@ -18,6 +18,7 @@ apply plugin: 'com.android.application'
 android {
     namespace 'xyz.boomground.game'
     compileSdk 34
+    buildToolsVersion '36.1.0'
     ndkVersion '26.1.10909125'
 
     defaultConfig {
@@ -43,6 +44,12 @@ android {
             minifyEnabled false
             signingConfig signingConfigs.debug
         }
+    }
+
+    // Pas d'analyse lint à la compilation : inutile pour une activité de
+    // quelques lignes, et elle allonge le build.
+    lint {
+        checkReleaseBuilds false
     }
 
     compileOptions {

@@ -800,13 +800,13 @@ impl Settings {
 /// Dossier de configuration selon le système (Windows, macOS, Linux).
 pub fn config_dir() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
-    let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
     // Android : dossier privé de l'application (pas de HOME).
     #[cfg(target_os = "android")]
     {
         return bevy::android::ANDROID_APP.get().and_then(|app| app.internal_data_path());
     }
     #[allow(unreachable_code)]
+    let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
     if cfg!(target_os = "windows") {
         env("APPDATA").map(|p| p.join("BoomGround"))
     } else if cfg!(target_os = "macos") {
