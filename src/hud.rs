@@ -380,7 +380,7 @@ pub fn update(
     values.push((HudLabel::Money, money));
     let destroyed = world.total.saturating_sub(world.alive);
     let mut info = format!("Seed {} · {} voxels détruits", world.seed, thousands(destroyed));
-    if lobby.active {
+    if lobby.active && !lobby.solo {
         info.push_str(&format!(" · {} en ligne", lobby.players.len()));
     }
     values.push((HudLabel::Info, info));
@@ -404,6 +404,9 @@ pub fn update(
     meter.frames += 1;
     if meter.elapsed >= 0.5 {
         let average = meter.frames as f32 / meter.elapsed;
+        if std::env::var_os("BOOM_FPSLOG").is_some() {
+            eprintln!("FPS {average:.0}");
+        }
         let fps = if settings.show_fps { format!("{average:.0} FPS") } else { String::new() };
         values.push((HudLabel::Fps, fps));
         meter.elapsed = 0.0;
@@ -488,7 +491,7 @@ pub fn update(
     values.push((HudLabel::Death, death));
 
     // --- Joueurs en ligne (Tab maintenu) ---
-    let show_players = lobby.active && keys.pressed(KeyCode::Tab);
+    let show_players = lobby.active && !lobby.solo && keys.pressed(KeyCode::Tab);
     if let Ok(mut node) = nodes.p2().single_mut() {
         let d = if show_players { Display::Flex } else { Display::None };
         if node.display != d {

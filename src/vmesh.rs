@@ -40,6 +40,71 @@ pub struct ChunkEntities {
     map: HashMap<IVec3, ChunkPair>,
 }
 
+/// Luminosité selon l'occlusion ambiante d'un coin (0 = très enfoncé).
+const AO_LEVELS: [f32; 4] = [0.50, 0.68, 0.84, 1.0];
+
+/// Occlusion ambiante des quatre coins d'une face, dans l'ordre des coins
+/// `(−u,−v) (+u,−v) (+u,+v) (−u,+v)`, empaquetée sur 8 bits. `air` est la
+/// cellule vide qui touche la face.
+fn ao_bits(world: &impl Cells, air: IVec3, du: IVec3, dv: IVec3) -> u32 {
+    let occ = |c: IVec3| -> u32 {
+        let m = world.solid(c);
+        (m && pass_of(world.mat(c)) == 0) as u32
+    };
+    let mut bits = 0;
+    for (k, (su, sv)) in [(-1, -1), (1, -1), (1, 1), (-1, 1)].into_iter().enumerate() {
+        let s1 = occ(air + du * su);
+        let s2 = occ(air + dv * sv);
+        let c = occ(air + du * su + dv * sv);
+        let level = if s1 == 1 && s2 == 1 { 0 } else { 3 - (s1 + s2 + c) };
+        bits |= level << (2 * k);
+    }
+    bits
+}
+
+/// Ce que le maillage a besoin de savoir d'une grille de voxels : le
+/// monde, ou la grille d'un corps rigide.
+pub trait Cells {
+    fn dims(&self) -> IVec3;
+    fn origin(&self) -> Vec3;
+    fn solid(&self, c: IVec3) -> bool;
+    fn mat(&self, c: IVec3) -> u8;
+}
+
+impl Cells for VoxelWorld {
+    fn dims(&self) -> IVec3 {
+        self.dims
+    }
+    fn origin(&self) -> Vec3 {
+        self.origin
+    }
+    #[inline]
+    fn solid(&self, c: IVec3) -> bool {
+        self.is_solid(c)
+    }
+    #[inline]
+    fn mat(&self, c: IVec3) -> u8 {
+        self.material(c)
+    }
+}
+
+impl Cells for crate::sim::BodyGrid {
+    fn dims(&self) -> IVec3 {
+        self.dims
+    }
+    fn origin(&self) -> Vec3 {
+        Vec3::ZERO
+    }
+    #[inline]
+    fn solid(&self, c: IVec3) -> bool {
+        self.is_solid(c)
+    }
+    #[inline]
+    fn mat(&self, c: IVec3) -> u8 {
+        self.material(c)
+    }
+}
+
 /// Passe de rendu d'un matériau : 0 opaque, 1 vitres, 2 lampes.
 #[inline]
 fn pass_of(material: u8) -> u8 {
@@ -51,24 +116,24 @@ fn pass_of(material: u8) -> u8 {
 }
 
 #[inline]
-fn opaque(world: &VoxelWorld, c: IVec3) -> bool {
-    world.is_solid(c) && pass_of(world.material(c)) == 0
+fn opaque(world: &impl Cells, c: IVec3) -> bool {
+    world.solid(c) && pass_of(world.mat(c)) == 0
 }
 
 /// Cellule solide appartenant à la passe `pass` (≥ 1).
 #[inline]
-fn in_pass(world: &VoxelWorld, c: IVec3, pass: u8) -> bool {
-    world.is_solid(c) && pass_of(world.material(c)) == pass
+fn in_pass(world: &impl Cells, c: IVec3, pass: u8) -> bool {
+    world.solid(c) && pass_of(world.mat(c)) == pass
 }
 
 /// Construit le maillage d'un morceau par fusion gloutonne (`glass_pass` :
 /// uniquement les vitres, sinon uniquement l'opaque).
-pub fn build(world: &VoxelWorld, chunk_corner: IVec3, glass_pass: bool) -> Mesh {
+pub fn build(world: &impl Cells, chunk_corner: IVec3, glass_pass: bool) -> Mesh {
     build_pass(world, chunk_corner, glass_pass as u8)
 }
 
 /// Comme [`build`], pour une passe : 0 opaque, 1 vitres, 2 lampes.
-pub fn build_pass(world: &VoxelWorld, chunk_corner: IVec3, pass: u8) -> Mesh {
+pub fn build_pass(world: &impl Cells, chunk_corner: IVec3, pass: u8) -> Mesh {
     let glass_pass = pass != 0;
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
@@ -77,7 +142,7 @@ pub fn build_pass(world: &VoxelWorld, chunk_corner: IVec3, pass: u8) -> Mesh {
     let mut indices: Vec<u32> = Vec::new();
 
     let min = chunk_corner.max(IVec3::ZERO);
-    let mut max = (chunk_corner + IVec3::splat(CHUNK)).min(world.dims);
+    let mut max = (chunk_corner + IVec3::splat(CHUNK)).min(world.dims());
 
     // Passe vitres : rien à faire si le morceau n'en contient aucune.
     if glass_pass {
@@ -102,7 +167,11 @@ pub fn build_pass(world: &VoxelWorld, chunk_corner: IVec3, pass: u8) -> Mesh {
         // +axis). 0 = pas de face.
         let width = (max_u - min_u) as usize;
         let height = (max_v - min_v) as usize;
-        let mut mask = vec![0u16; width * height];
+        let mut mask = vec![0u32; width * height];
+        let mut du = IVec3::ZERO;
+        du[u] = 1;
+        let mut dv = IVec3::ZERO;
+        dv[v] = 1;
 
         // Le premier morceau construit aussi le plan du bord de la grille,
         // sinon les faces extérieures de la carte manquaient.
@@ -118,11 +187,11 @@ pub fn build_pass(world: &VoxelWorld, chunk_corner: IVec3, pass: u8) -> Mesh {
                     let mut back = here;
                     back[axis] = slice + 1;
 
-                    let value = if glass_pass {
-                        if in_pass(world, here, pass) && !world.is_solid(back) {
-                            ((world.material(here) as u16 + 1) << 1) | 1
-                        } else if in_pass(world, back, pass) && !world.is_solid(here) {
-                            (world.material(back) as u16 + 1) << 1
+                    let value: u32 = if glass_pass {
+                        if in_pass(world, here, pass) && !world.solid(back) {
+                            ((world.mat(here) as u32 + 1) << 1) | 1 | (0xFF << 16)
+                        } else if in_pass(world, back, pass) && !world.solid(here) {
+                            ((world.mat(back) as u32 + 1) << 1) | (0xFF << 16)
                         } else {
                             0
                         }
@@ -130,9 +199,9 @@ pub fn build_pass(world: &VoxelWorld, chunk_corner: IVec3, pass: u8) -> Mesh {
                         let a = opaque(world, here);
                         let b = opaque(world, back);
                         if a && !b {
-                            ((world.material(here) as u16 + 1) << 1) | 1
+                            ((world.mat(here) as u32 + 1) << 1) | 1 | (ao_bits(world, back, du, dv) << 16)
                         } else if !a && b {
-                            (world.material(back) as u16 + 1) << 1
+                            ((world.mat(back) as u32 + 1) << 1) | (ao_bits(world, here, du, dv) << 16)
                         } else {
                             0
                         }
@@ -162,9 +231,15 @@ pub fn build_pass(world: &VoxelWorld, chunk_corner: IVec3, pass: u8) -> Mesh {
                         h += 1;
                     }
 
-                    let material = ((value >> 1) - 1) as u8;
+                    let material = (((value & 0xFFFF) >> 1) - 1) as u8;
                     let mut color = palette_linear(material);
                     let forward = value & 1 == 1;
+                    let ao = [
+                        ((value >> 16) & 3) as usize,
+                        ((value >> 18) & 3) as usize,
+                        ((value >> 20) & 3) as usize,
+                        ((value >> 22) & 3) as usize,
+                    ];
 
                     // Éclairage d'appoint par orientation : les faces du
                     // dessous sont plus sombres, le dessus un peu plus clair.
@@ -180,7 +255,7 @@ pub fn build_pass(world: &VoxelWorld, chunk_corner: IVec3, pass: u8) -> Mesh {
                     }
 
                     let plane = slice as f32 + 1.0;
-                    let origin = world.origin;
+                    let origin = world.origin();
                     let p0 = corner(&min, &origin, axis, u, v, i as i32, j as i32, plane);
                     let p1 = corner(&min, &origin, axis, u, v, (i + w) as i32, j as i32, plane);
                     let p2 = corner(&min, &origin, axis, u, v, (i + w) as i32, (j + h) as i32, plane);
@@ -189,10 +264,10 @@ pub fn build_pass(world: &VoxelWorld, chunk_corner: IVec3, pass: u8) -> Mesh {
                     let mut normal = [0.0f32; 3];
                     normal[axis] = if forward { 1.0 } else { -1.0 };
 
-                    let quad = if forward {
-                        [p0, p1, p2, p3]
+                    let (quad, ao) = if forward {
+                        ([p0, p1, p2, p3], ao)
                     } else {
-                        [p3, p2, p1, p0]
+                        ([p3, p2, p1, p0], [ao[3], ao[2], ao[1], ao[0]])
                     };
                     let quad_uv = [
                         [0.0, 0.0],
@@ -206,9 +281,15 @@ pub fn build_pass(world: &VoxelWorld, chunk_corner: IVec3, pass: u8) -> Mesh {
                         positions.push(quad[k]);
                         normals.push(normal);
                         uvs.push(quad_uv[k]);
-                        colors.push(color);
+                        let f = AO_LEVELS[ao[k]];
+                        colors.push([color[0] * f, color[1] * f, color[2] * f, color[3]]);
                     }
-                    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                    // Diagonale choisie selon l'occlusion : pas de couture.
+                    if ao[0] + ao[2] >= ao[1] + ao[3] {
+                        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                    } else {
+                        indices.extend_from_slice(&[base + 1, base + 2, base + 3, base + 1, base + 3, base]);
+                    }
 
                     for b in 0..h {
                         for a in 0..w {

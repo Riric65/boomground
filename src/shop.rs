@@ -231,6 +231,7 @@ pub fn interact(
     mut game: ResMut<GameState>,
     shop: Res<ShopState>,
     mut toasts: ResMut<ui::Toasts>,
+    mut net: ResMut<crate::net::client::NetClient>,
     buy: Query<&ShopBuy, Added<Pressed>>,
     ammo: Query<&ShopAmmo, Added<Pressed>>,
 ) {
@@ -239,6 +240,9 @@ pub fn interact(
     }
     let mut result: Option<Result<String, &'static str>> = None;
     for ShopBuy(id) in &buy {
+        if net.is_online() {
+            net.send_raw(crate::net::protocol::Packet::Buy { weapon: id.tag(), ammo: false });
+        }
         let r = game.buy(*id).map(|_| format!("{} acheté !", id.spec().name));
         if r.is_ok() && !id.is_bomb() {
             game.weapon = *id;
@@ -246,6 +250,9 @@ pub fn interact(
         result = Some(r);
     }
     for ShopAmmo(id) in &ammo {
+        if net.is_online() {
+            net.send_raw(crate::net::protocol::Packet::Buy { weapon: id.tag(), ammo: true });
+        }
         result = Some(
             game.buy_ammo(*id)
                 .map(|_| format!("+{} munitions pour {}", id.spec().ammo_pack, id.spec().name)),

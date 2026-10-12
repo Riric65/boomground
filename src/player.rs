@@ -9,7 +9,20 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::camera::visibility::RenderLayers;
-use bevy::camera::ClearColorConfig;
+use bevy::camera::{ClearColorConfig, Hdr};
+use bevy::post_process::bloom::Bloom;
+use bevy::render::view::{ColorGrading, ColorGradingGlobal, Msaa, Tonemapping};
+
+fn grading() -> ColorGrading {
+    ColorGrading {
+        global: ColorGradingGlobal {
+            exposure: 0.35,
+            post_saturation: 1.22,
+            ..default()
+        },
+        ..default()
+    }
+}
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
@@ -79,6 +92,14 @@ pub fn spawn_player(mut commands: Commands, world: Res<VoxelWorld>) {
                     // atténués par rapport à cette caméra.
                     SpatialListener::default(),
                     Camera3d::default(),
+                    Hdr,
+                    if std::env::var("BOOM_MSAA").is_ok_and(|v| v == "0") { Msaa::Off } else { Msaa::Sample4 },
+                    Tonemapping::TonyMcMapface,
+                    grading(),
+                    Bloom {
+                        intensity: 0.12,
+                        ..Bloom::NATURAL
+                    },
                     Projection::from(PerspectiveProjection {
                         fov: 75f32.to_radians(),
                         far: 600.0,
@@ -101,6 +122,10 @@ pub fn spawn_player(mut commands: Commands, world: Res<VoxelWorld>) {
                 (
                     ViewModelCamera,
                     Camera3d::default(),
+                    Hdr,
+                    Msaa::Sample4,
+                    Tonemapping::TonyMcMapface,
+                    grading(),
                     Camera {
                         order: 1,
                         clear_color: ClearColorConfig::None,

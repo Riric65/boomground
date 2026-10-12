@@ -45,6 +45,8 @@ pub struct NetClient {
     /// peut partir en plusieurs fois sans être coupée).
     outbox: Vec<u8>,
     pub id: Option<u16>,
+    /// Numéro du dernier tir (les plombs d'un même tir le partagent).
+    pub shot: u16,
     /// La connexion a été perdue (pas un départ volontaire) : raison.
     pub lost: Option<String>,
 }
@@ -62,6 +64,8 @@ pub struct Lobby {
     pub joined_with: String,
     /// Partie hébergée par ce jeu (serveur en fond).
     pub hosting: Option<HostHandle>,
+    /// Partie solo (serveur privé local) : le jeu peut la mettre en pause.
+    pub solo: bool,
 }
 
 impl Lobby {
@@ -256,11 +260,13 @@ pub fn send_state(
 
 /// Informe le serveur d'une action d'arme (déjà prédite en local).
 pub fn send_hit(net: &mut NetClient, kind: HitKind, origin: Vec3, dir: Vec3, blast: f32) {
+    let shot = net.shot;
     net.send_raw(Packet::Hit {
         kind,
         origin,
         dir,
         blast,
+        shot,
     });
 }
 
@@ -284,7 +290,12 @@ pub fn receive(
     tags: Query<(Entity, &NameTag)>,
     bombs: Query<(Entity, &crate::weapon::Bomb, &Transform), Without<RemotePlayer>>,
     ragdolls: Query<(Entity, &crate::vitals::Ragdoll)>,
+    mut mirror: ResMut<crate::net::mirror::Mirror>,
+    mut net_blocks: Query<&mut crate::net::mirror::NetBlock>,
+    mut net_bodies: Query<&mut crate::net::mirror::NetBody>,
+    camera: Query<&GlobalTransform, With<crate::player::WorldCamera>>,
 ) {
+    let camera_pos = camera.single().map(|c| c.translation()).unwrap_or(Vec3::ZERO);
     if !d.net.is_online() {
         // Hors ligne : plus personne d'autre dans le monde.
         for (entity, _, _) in &remotes {
@@ -336,34 +347,69 @@ pub fn receive(
             Packet::Start => {
                 lobby.started = true;
             }
-            Packet::Voxels { cells, rubble } => {
+            Packet::Voxels { cells, .. } => {
                 // Autorité du serveur : on applique (idempotent : un voxel
-                // déjà cassé en local est ignoré).
-                let mut destroyed = Vec::new();
+                // déjà cassé en local est ignoré). Les gravats arrivent par
+                // `Blocks`.
                 for c in cells {
                     let cell = IVec3::new(c[0] as i32, c[1] as i32, c[2] as i32);
                     if d.world.is_solid(cell) {
                         d.world.set(cell, false, 0);
-                        destroyed.push(cell);
                     }
                 }
-                if rubble && !destroyed.is_empty() {
-                    let center = destroyed
-                        .iter()
-                        .map(|&c| d.world.cell_center(c))
-                        .sum::<Vec3>()
-                        / destroyed.len() as f32;
-                    crate::rubble::spawn_rubble(
-                        &mut d.rubble,
-                        &mut d.commands,
-                        &d.assets,
-                        &d.world,
-                        &destroyed,
-                        center,
-                        Vec3::ZERO,
-                        &mut d.rng,
-                    );
+            }
+            Packet::Blocks { list } => {
+                mirror.add_blocks(&mut d.commands, &d.assets, &list);
+            }
+            Packet::BlockPose { list } => {
+                mirror.pose_blocks(&mut d.commands, &list, &mut net_blocks);
+            }
+            Packet::BlockRemove { ids } => {
+                mirror.remove_blocks(&mut d.commands, &ids);
+            }
+            Packet::BodyDef { id, dims, com, part, total, data } => {
+                mirror.body_part(&mut d.commands, &mut meshes, &d.assets, id, dims, com, part, total, data);
+            }
+            Packet::BodyPose { list } => {
+                mirror.pose_bodies(&list, &mut net_bodies);
+            }
+            Packet::BodyRemove { id } => {
+                mirror.remove_body(&mut d.commands, id);
+            }
+            Packet::Inv { money, earned, slots } => {
+                d.game.money = money;
+                d.game.earned = earned;
+                for (i, w) in crate::game::ALL_WEAPONS.iter().enumerate() {
+                    if let Some(v) = slots.get(i) {
+                        let slot = d.game.slot_mut(*w);
+                        slot.owned = v[0] != 0;
+                        slot.mag = v[1];
+                        slot.reserve = v[2];
+                    }
                 }
+                if !d.game.slot(d.game.weapon).owned {
+                    if let Some(&first) = d.game.owned().first() {
+                        d.game.weapon = first;
+                    }
+                }
+            }
+            Packet::Notice { text } => {
+                toasts.push(text);
+            }
+            Packet::Kicked { reason } => {
+                d.net.lost = Some(reason);
+            }
+            Packet::Teleport { pos } => {
+                d.game.teleport_to = Some(pos);
+            }
+            Packet::Impact { at, power } => {
+                let kind = if power > 9.0 { crate::fx::SfxKind::BigBoom } else { crate::fx::SfxKind::Boom };
+                crate::fx::play_at(&mut d.commands, &d.bank, kind, (0.3 + power * 0.04).min(1.0), at);
+                d.shake.add((0.05 * power / (1.0 + at.distance(camera_pos) * 0.15)).min(0.5));
+            }
+            Packet::Reset { seed } => {
+                d.game.seed = seed;
+                d.world.rebuild(seed);
             }
             Packet::Player {
                 id, pos, yaw, pitch, ..
@@ -541,7 +587,12 @@ pub fn receive(
             | Packet::State { .. }
             | Packet::Hit { .. }
             | Packet::Place { .. }
-            | Packet::Interact { .. } => {}
+            | Packet::Interact { .. }
+            | Packet::Reload
+            | Packet::Buy { .. }
+            | Packet::Throw { .. }
+            | Packet::Command { .. }
+            | Packet::Ping => {}
         }
     }
 }

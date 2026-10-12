@@ -16,8 +16,10 @@ Les fichiers précompilés sont dans les [releases](https://github.com/Riric65/b
 | Windows | `BoomGround-Setup.exe` | `BoomGround-server.exe` |
 | Linux | `BoomGround-x86_64.AppImage` (`chmod +x`, puis double-clic) | `BoomGround-server-linux-x86_64` |
 
-Le jeu est **un seul fichier**. Au premier lancement (Windows), il propose de s'installer
-(raccourcis, pare-feu, désinstallation) ou de jouer sans installer. Détails : [INSTALL](#installation-windows).
+Le jeu est **un seul fichier**. Au premier lancement, il propose de s'installer (raccourcis,
+menu des applications, commande `boomground`, pare-feu sous Windows) ou de jouer sans
+installer. Sous Linux, l'AppImage s'installe elle-même dans `~/.local/share/boomground`.
+Détails : [Installation](#installation).
 
 ## Ce que contient le jeu
 
@@ -30,11 +32,18 @@ Le jeu est **un seul fichier**. Au premier lancement (Windows), il propose de s'
 - **Portes** qui s'ouvrent et se ferment (`F`), et que l'on peut aussi démolir.
 - **Construction** : l'outil *Blocs* pose des blocs de bois, brique, béton, métal, verre,
   plâtre, tuile, noir ou lumière.
-- **Physique** : ce qui n'est plus relié au sol s'écroule ; les gravats ont une masse
-  (le métal et le béton pèsent plus que le bois), les lourds sont moins poussés par le
-  souffle et écrasent le joueur en tombant (solo).
-- **Mort** : 100 points de vie. À 0, le personnage devient un ragdoll, la caméra passe à la
-  troisième personne, puis tu réapparais au bout de quelques secondes.
+- **Physique** : un bâtiment dont la base est détruite **tombe en un seul bloc** : l'ensemble
+  détaché devient un corps rigide (masse selon les matériaux, centre de masse, inertie) qui
+  chute à 9,81 m/s², bascule, heurte le monde et se casse à l'impact, puis se fige. Les
+  gravats ont une masse (le métal et le béton pèsent plus que le bois). Les corps lourds
+  écrasent les joueurs.
+- **Mort** : 100 points de vie (explosions, balles, chutes, écrasement). À 0, le personnage
+  devient un ragdoll, la caméra passe à la troisième personne, puis tu réapparais.
+- **Mondes sauvegardables** : un fichier `.bgw` contient **tout** (ville modifiée, gravats,
+  corps en chute, portes, joueurs, argent, munitions). Menu → *Sauvegarder le monde* ;
+  onglet Jouer → *Mondes sauvegardés*. Les serveurs sauvegardent aussi automatiquement.
+- **Une seule logique de jeu** : le solo lance un serveur privé local. Tout ce qui existe
+  en solo (physique, dégâts, argent, portes, blocs, sauvegardes) existe donc en ligne.
 - **19 outils** : marteaux, pioche, marteau-piqueur, armes à feu, bombes, blocs.
 - **Multijoueur** : lobbys sur le réseau local, par code via Internet (UPnP), serveur dédié.
 
@@ -98,8 +107,9 @@ Il annonce la partie sur le réseau local et demande à ta box d'ouvrir le port 
 (UPnP). Les joueurs d'Internet entrent avec le **code de la partie** (ex. `K7M2Q-9XH4C`).
 L'hôte clique sur **Lancer la partie** ; un joueur qui arrive ensuite entre directement.
 
-Le serveur est l'autorité : il valide chaque tir, pose, ouverture de porte et applique les
-dégâts. Si des amis d'Internet n'entrent pas, le lobby affiche la raison (UPnP désactivé,
+Le serveur est l'autorité : il simule la physique, tient l'argent et les munitions de chaque
+joueur, valide chaque tir, pose et ouverture de porte, applique les dégâts, et contrôle les
+déplacements (vitesse, traversée de murs, vol, chutes). Si des amis d'Internet n'entrent pas, le lobby affiche la raison (UPnP désactivé,
 box derrière un CGNAT…) ; redirige alors le port 28431 (TCP) à la main, ou utilise un réseau
 virtuel (Tailscale, ZeroTier).
 
@@ -109,11 +119,12 @@ Lance `BoomGround-server` : au premier démarrage il crée un **`server.conf`** 
 l'exécutable (nom, port, seed, mode, joueurs max, pvp, dégâts, réapparition). Modifie-le
 puis relance. Voir [SERVER.md](SERVER.md).
 
-## Installation (Windows)
+## Installation
 
 Au premier lancement, le jeu affiche son écran d'installation :
-- **Installer** : copie dans `%LOCALAPPDATA%\Programs\BoomGround`, raccourcis Bureau et menu
-  Démarrer, sans droits administrateur. Une case ajoute la règle de pare-feu du multijoueur.
+- **Installer** : Windows → `%LOCALAPPDATA%\Programs\BoomGround`, raccourcis Bureau et menu
+  Démarrer ; Linux → `~/.local/share/boomground`, entrée du menu des applications, commande
+  `boomground`. Sans droits administrateur. Une case ajoute la règle de pare-feu (Windows).
 - **Jouer sans installer** : version portable (`--portable`).
 
 Désinstaller : « Applications installées » → BoomGround, ou Paramètres → Désinstaller.
@@ -144,13 +155,14 @@ Variables de test : `BOOM_AUTO=1` (le jeu joue seul), `BOOM_WEAPON`, `BOOM_MODE=
 
 | Module | Rôle |
 |---|---|
-| `world.rs` | grille en morceaux 16³ alloués à la demande, rayon DDA, `carve`, `collapse` (effondrement), `sweep`, portes |
+| `world.rs` | grille en morceaux 16³ alloués à la demande, rayon DDA, `carve`, détection des ensembles flottants, `sweep`, portes |
+| `sim.rs` | physique du serveur : gravats, corps rigides (collisions, impacts, scission, figeage), sérialisation |
 | `map.rs` | génération de la ville : quartiers, bâtiments, mobilier, mobilier urbain |
 | `vmesh.rs` | greedy meshing par morceaux (opaque, vitres, lampes) avec file de reconstruction |
 | `rubble.rs` | gravats rigides avec masse, empilement, sommeil |
-| `vitals.rs` | points de vie, mort, ragdoll à particules, caméra de mort, écrasement |
+| `vitals.rs` | mort, ragdoll à particules, caméra de mort, réapparition (côté client) |
 | `weapon.rs`, `game.rs` | outils, construction, interactions ; état, réglages, spécifications |
-| `net/` | protocole, client, serveur (lobby, dégâts, portes, blocs), réseau local, UPnP |
+| `net/` | protocole, client + reflet de la simulation, serveur (autorité), `server.conf`, sauvegardes `.bgw`, journal, réseau local, UPnP |
 | `menu.rs`, `hud.rs`, `shop.rs`, `ui.rs` | interface |
 | `install.rs` | installation autonome |
 

@@ -1,8 +1,7 @@
 #!/usr/bin/env sh
 # Construit dist/BoomGround-x86_64.AppImage (le jeu) et
 # dist/BoomGround-server-linux-x86_64 (serveur dédié) sous Linux.
-# L'AppImage se lance avec --portable : pas d'écran d'installation, elle est
-# déjà un fichier autonome.
+# Au premier lancement, le jeu propose de s'installer (comme sous Windows).
 #
 # Usage : sh scripts/package-appimage.sh
 set -eu
@@ -28,10 +27,14 @@ Categories=Game;
 Terminal=false
 DESKTOP
 
+# Pas de --portable : au premier lancement le jeu propose de s'installer
+# (menu des applications, raccourci, commande `boomground`) ou de jouer
+# sans installer. $APPIMAGE (défini par l'AppImage) indique le fichier à
+# copier.
 cat > "$appdir/AppRun" <<'APPRUN'
 #!/bin/sh
 here="$(dirname "$(readlink -f "$0")")"
-exec "$here/usr/bin/boomground" --portable "$@"
+exec "$here/usr/bin/boomground" "$@"
 APPRUN
 chmod +x "$appdir/AppRun"
 

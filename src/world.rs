@@ -139,13 +139,29 @@ impl VoxelWorld {
         if self.full_rebuild {
             return;
         }
+        // Une cellule modifie les faces des cellules voisines (jusqu'à une
+        // cellule de distance : occlusion ambiante comprise), donc les
+        // morceaux voisins quand elle touche leur bord.
         let key = c.div_euclid(IVec3::splat(MESH_CHUNK));
-        self.dirty_chunks.insert(key);
-        for axis in 0..3 {
-            if c[axis].rem_euclid(MESH_CHUNK) == 0 && c[axis] > 0 {
-                let mut k = key;
-                k[axis] -= 1;
-                self.dirty_chunks.insert(k);
+        let local = c.rem_euclid(IVec3::splat(MESH_CHUNK));
+        let mut lo = [0i32; 3];
+        let mut hi = [0i32; 3];
+        for a in 0..3 {
+            if local[a] == 0 {
+                lo[a] = -1;
+            }
+            if local[a] == MESH_CHUNK - 1 {
+                hi[a] = 1;
+            }
+        }
+        for dx in lo[0]..=hi[0] {
+            for dy in lo[1]..=hi[1] {
+                for dz in lo[2]..=hi[2] {
+                    let k = key + IVec3::new(dx, dy, dz);
+                    if k.cmpge(IVec3::ZERO).all() {
+                        self.dirty_chunks.insert(k);
+                    }
+                }
             }
         }
     }
@@ -272,20 +288,19 @@ impl VoxelWorld {
         best.map(|(i, _)| i)
     }
 
-    /// Intégrité structurelle : après une destruction, retire (et renvoie)
-    /// les voxels qui ne tiennent plus au sol. `destroyed` : cellules qui
-    /// viennent d'être détruites.
+    /// Intégrité structurelle : après une destruction, retire du monde les
+    /// ensembles de voxels qui ne tiennent plus au sol et les renvoie, un
+    /// `Vec` par ensemble (ils deviennent des corps rigides, voir `sim`).
+    /// `destroyed` : cellules qui viennent d'être détruites.
     ///
     /// Recherche « meilleur d'abord » vers le bas depuis chaque voisin
     /// plein : un ensemble relié au sol est trouvé en quelques pas ; un
-    /// ensemble flottant est exploré en entier puis retiré. Les très gros
-    /// ensembles (au-delà de `LIMIT`) sont réputés stables.
-    pub fn collapse(&mut self, destroyed: &[IVec3]) -> Vec<IVec3> {
+    /// ensemble flottant est exploré en entier. Seuls les ensembles
+    /// démesurés (> `MAX_BODY_VOXELS`) sont réputés stables.
+    pub fn collapse_components(&mut self, destroyed: &[IVec3]) -> Vec<Vec<IVec3>> {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
-        const LIMIT: usize = 24_000;
-        const MAX_SEEDS: usize = 4_000;
-        const MAX_FALLEN: usize = 60_000;
+        const MAX_SEEDS: usize = 6_000;
         const OFFSETS: [IVec3; 6] = [
             IVec3::X,
             IVec3::NEG_X,
@@ -295,6 +310,7 @@ impl VoxelWorld {
             IVec3::NEG_Z,
         ];
         let ground = crate::map::GROUND;
+        let limit = crate::sim::MAX_BODY_VOXELS;
 
         let mut seeds: Vec<IVec3> = Vec::new();
         let mut seen_seed: HashSet<IVec3> = HashSet::new();
@@ -311,9 +327,9 @@ impl VoxelWorld {
         }
 
         let mut anchored: HashSet<IVec3> = HashSet::new();
-        let mut fallen: Vec<IVec3> = Vec::new();
+        let mut out: Vec<Vec<IVec3>> = Vec::new();
         for seed in seeds {
-            if anchored.contains(&seed) || !self.is_solid(seed) || fallen.len() >= MAX_FALLEN {
+            if anchored.contains(&seed) || !self.is_solid(seed) {
                 continue;
             }
             let mut visited: HashSet<IVec3> = HashSet::new();
@@ -322,7 +338,7 @@ impl VoxelWorld {
             heap.push(Reverse((seed.y, seed.x, seed.z)));
             let mut stable = false;
             while let Some(Reverse((y, x, z))) = heap.pop() {
-                if y < ground || visited.len() > LIMIT {
+                if y < ground || visited.len() > limit {
                     stable = true;
                     break;
                 }
@@ -340,10 +356,15 @@ impl VoxelWorld {
                 for &c in &visited {
                     self.set(c, false, 0);
                 }
-                fallen.extend(visited);
+                out.push(visited.into_iter().collect());
             }
         }
-        fallen
+        out
+    }
+
+    /// Variante à plat : toutes les cellules retirées.
+    pub fn collapse(&mut self, destroyed: &[IVec3]) -> Vec<IVec3> {
+        self.collapse_components(destroyed).into_iter().flatten().collect()
     }
 
     /// Clefs des morceaux qui contiennent (ou ont contenu) du solide.
@@ -823,11 +844,90 @@ pub fn material_value(material: u8) -> u32 {
     }
 }
 
+/// Texture d'un voxel (32 × 32, avec mipmaps) : grain, léger biseau et joint
+/// sombre. Les UV du maillage valent 1 par voxel : chaque voxel reçoit son
+/// propre grain, même sur un grand rectangle fusionné.
+fn voxel_texture() -> Image {
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    const SIZE: usize = 32;
+    let mut level: Vec<f32> = vec![0.0; SIZE * SIZE];
+    let mut seed: u32 = 0x9E37_79B9;
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = ((seed >> 16) & 0xFF) as f32 / 255.0 - 0.5;
+            // Grain fin + un peu de plaques plus larges.
+            let blob = (((x / 8) * 31 + (y / 8) * 17) % 7) as f32 / 7.0 - 0.5;
+            let mut v = 0.9 + noise * 0.10 + blob * 0.05;
+            // Joint sombre sur deux bords, biseau clair sur les autres.
+            if x == SIZE - 1 || y == SIZE - 1 {
+                v *= 0.72;
+            } else if x == 0 || y == 0 {
+                v *= 1.06;
+            }
+            level[y * SIZE + x] = v.clamp(0.0, 1.0);
+        }
+    }
+    let mut data: Vec<u8> = Vec::new();
+    let mut mips = 0;
+    let mut size = SIZE;
+    let mut cur = level;
+    loop {
+        for v in &cur {
+            let b = (v * 255.0) as u8;
+            data.extend_from_slice(&[b, b, b, 255]);
+        }
+        mips += 1;
+        if size == 1 {
+            break;
+        }
+        let next = size / 2;
+        let mut down = vec![0.0f32; next * next];
+        for y in 0..next {
+            for x in 0..next {
+                let s = cur[(2 * y) * size + 2 * x]
+                    + cur[(2 * y) * size + 2 * x + 1]
+                    + cur[(2 * y + 1) * size + 2 * x]
+                    + cur[(2 * y + 1) * size + 2 * x + 1];
+                down[y * next + x] = s * 0.25;
+            }
+        }
+        cur = down;
+        size = next;
+    }
+    let base_len = SIZE * SIZE * 4;
+    let mut image = Image::new(
+        Extent3d {
+            width: SIZE as u32,
+            height: SIZE as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data[..base_len].to_vec(),
+        TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.mip_level_count = mips;
+    image.data = Some(data);
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 8,
+        ..default()
+    });
+    image
+}
+
 /// Crée les meshes et la palette.
 pub fn setup_voxel_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let palette: Vec<_> = (0..PALETTE.len())
         .map(|i| {
@@ -852,6 +952,7 @@ pub fn setup_voxel_assets(
         }),
         voxel_material: materials.add(StandardMaterial {
             base_color: Color::WHITE,
+            base_color_texture: Some(images.add(voxel_texture())),
             perceptual_roughness: 0.9,
             ..default()
         }),
@@ -885,10 +986,24 @@ pub fn handle_reset(
     keys: Res<ButtonInput<KeyCode>>,
     mut world: ResMut<VoxelWorld>,
     mut game: ResMut<crate::game::GameState>,
-    net: Res<crate::net::client::NetClient>,
+    mut net: ResMut<crate::net::client::NetClient>,
+    lobby: Res<crate::net::client::Lobby>,
 ) {
-    // En multijoueur, la carte appartient au serveur.
+    // En ligne, la carte appartient au serveur : en solo (serveur privé),
+    // F5 / F6 le lui demandent.
     if net.is_online() {
+        if lobby.solo && game.in_game() {
+            let command = if keys.just_pressed(KeyCode::F5) {
+                Some(format!("reset {}", game.seed))
+            } else if keys.just_pressed(KeyCode::F6) {
+                Some("reset".to_string())
+            } else {
+                None
+            };
+            if let Some(text) = command {
+                net.send_raw(crate::net::protocol::Packet::Command { text });
+            }
+        }
         return;
     }
     if keys.just_pressed(KeyCode::F5) {
@@ -907,12 +1022,12 @@ pub struct Damage {
     pub glass: bool,
 }
 
-/// Destructeur commun (masse, balle, explosion) : creuse la sphère, crée les
-/// blocs de gravats et quelques débris.
+/// Destructeur commun côté client (masse, balle, explosion) : creuse la
+/// sphère pour un retour immédiat et lance quelques débris décoratifs. Les
+/// gravats, l'effondrement et l'argent viennent du serveur.
 #[allow(clippy::too_many_arguments)]
 pub fn damage(
     world: &mut VoxelWorld,
-    rubble: &mut crate::rubble::Rubble,
     commands: &mut Commands,
     assets: &VoxelAssets,
     rng: &mut crate::debris::Rng,
@@ -920,19 +1035,12 @@ pub fn damage(
     radius: f32,
     max_debris: usize,
     push: Vec3,
-    collapse: bool,
 ) -> Damage {
-    let mut destroyed = world.carve(center, radius);
+    let destroyed = world.carve(center, radius);
     let value = destroyed
         .iter()
         .map(|&c| material_value(world.material(c)))
         .sum();
-    // Ce qui ne tient plus au sol s'écroule (en ligne, le serveur décide).
-    if collapse && !destroyed.is_empty() {
-        let fallen = world.collapse(&destroyed);
-        destroyed.extend(fallen);
-    }
-    crate::rubble::spawn_rubble(rubble, commands, assets, world, &destroyed, center, push, rng);
 
     let debris = destroyed.len().min(max_debris);
     for _ in 0..debris {

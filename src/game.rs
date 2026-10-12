@@ -393,6 +393,37 @@ impl WeaponId {
         matches!(self.kind(), Kind::Thrown | Kind::Placed)
     }
 
+    /// Nom court pour `server.conf` (`railgun`, `c4`…).
+    pub fn key(self) -> &'static str {
+        use WeaponId::*;
+        match self {
+            Hammer => "hammer",
+            Sledge => "sledge",
+            WarHammer => "warhammer",
+            Jackhammer => "jackhammer",
+            Glock => "glock",
+            Shotgun => "shotgun",
+            Rifle => "rifle",
+            Sniper => "sniper",
+            Rocket => "rocket",
+            Grenade => "grenade",
+            Dynamite => "dynamite",
+            C4 => "c4",
+            MegaBomb => "megabomb",
+            Pickaxe => "pickaxe",
+            Revolver => "revolver",
+            Smg => "smg",
+            Minigun => "minigun",
+            Railgun => "railgun",
+            Blocks => "blocks",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        let k = key.trim().to_lowercase();
+        ALL_WEAPONS.iter().copied().find(|w| w.key() == k)
+    }
+
     /// Identifiant réseau.
     pub fn tag(self) -> u8 {
         ALL_WEAPONS.iter().position(|&w| w == self).unwrap_or(0) as u8
@@ -442,6 +473,10 @@ pub struct GameState {
     pub death_push: Vec3,
     /// Réapparition demandée à cette position.
     pub respawn_at: Option<Vec3>,
+    /// Déplacement forcé par le serveur (correction, chargement).
+    pub teleport_to: Option<Vec3>,
+    /// Nom du monde en cours (fichier de sauvegarde).
+    pub world_name: String,
 }
 
 impl Default for GameState {
@@ -462,6 +497,8 @@ impl Default for GameState {
             hurt_enabled: true,
             death_push: Vec3::ZERO,
             respawn_at: None,
+            teleport_to: None,
+            world_name: String::new(),
         };
         s.reset_inventory();
         s

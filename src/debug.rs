@@ -168,6 +168,21 @@ pub fn force_playing(
         }
         return;
     }
+    // Par défaut le test passe par le serveur privé du solo, comme le jeu.
+    // `BOOM_OFFLINE=1` : ancien chemin, sans serveur.
+    if !env("BOOM_OFFLINE") {
+        match crate::menu::launch_solo(&mut net, &mut lobby, &mut game, &name, &seed, mode, None) {
+            Ok(_) => {
+                if env("BOOM_SHOP") {
+                    shop.open = true;
+                } else {
+                    crate::player::grab(&mut cursor, true);
+                }
+            }
+            Err(e) => error!("solo impossible : {e}"),
+        }
+        return;
+    }
     game.mode = mode;
     if let Some(seed) = crate::game::parse_seed(&seed) {
         game.seed = seed;

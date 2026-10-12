@@ -37,6 +37,8 @@ pub struct MenuState {
     /// Mode choisi pour un lobby.
     pub lobby_mode: Mode,
     pub status: String,
+    /// Mondes sauvegardés (nom, chemin).
+    pub worlds: Vec<(String, std::path::PathBuf)>,
 }
 
 impl Default for MenuState {
@@ -46,6 +48,7 @@ impl Default for MenuState {
             mode: Mode::Sandbox,
             lobby_mode: Mode::Sandbox,
             status: String::new(),
+            worlds: Vec::new(),
         }
     }
 }
@@ -55,6 +58,8 @@ impl Default for MenuState {
 pub enum MenuAction {
     Tab(Tab),
     Resume,
+    SaveWorld,
+    LoadWorld(usize),
     Leave,
     Quit,
     SelectMode(Mode),
@@ -114,6 +119,8 @@ pub struct JoinField;
 pub struct StatusText;
 #[derive(Component)]
 pub struct LanList;
+#[derive(Component)]
+pub struct WorldList;
 #[derive(Component)]
 pub struct SettingValue(SettingKind);
 #[derive(Component)]
@@ -378,6 +385,20 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                     ),
                 ))
                 .with_child(ui::label(&font, "REPRENDRE", 22.0, ui::ACCENT_DARK));
+                side.spawn((
+                    OnlyWhenStarted,
+                    MenuAction::SaveWorld,
+                    ui::button_with(
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: px(44.0),
+                            margin: UiRect::bottom(px(14.0)),
+                            ..default()
+                        },
+                        ui::BUTTON,
+                    ),
+                ))
+                .with_child(ui::label(&font, "Sauvegarder le monde", 17.0, ui::TEXT));
                 nav_button(side, &font, Tab::Play, "Jouer");
                 nav_button(side, &font, Tab::Multi, "Multijoueur");
                 nav_button(side, &font, Tab::Settings, "Paramètres");
@@ -476,6 +497,16 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                             shadow(),
                         ))
                         .with_child(ui::label(&font, "LANCER LA PARTIE", 26.0, ui::ACCENT_DARK));
+                        p.spawn(ui::caption(&font, "Mondes sauvegardés"));
+                        p.spawn((
+                            WorldList,
+                            Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(6.0),
+                                width: px(678.0),
+                                ..default()
+                            },
+                        ));
                     });
 
                 // ===== Multijoueur =====
@@ -883,16 +914,43 @@ pub fn visibility(
     }
 }
 
-/// Lance une partie solo.
-fn start_solo(game: &mut GameState, world: &mut VoxelWorld, seed_text: &str, mode: Mode) -> u64 {
+/// Lance une partie solo : un serveur privé local, auquel le jeu se
+/// connecte comme n'importe quel client (une seule logique de jeu).
+pub fn launch_solo(
+    net: &mut NetClient,
+    lobby: &mut Lobby,
+    game: &mut GameState,
+    name: &str,
+    seed_text: &str,
+    mode: Mode,
+    load: Option<(String, std::path::PathBuf)>,
+) -> Result<u64, String> {
+    leave_online(net, lobby, game);
     let seed = game::parse_seed(seed_text).unwrap_or_else(game::random_seed);
-    game.seed = seed;
-    game.mode = mode;
-    game.reset_inventory();
-    game.started = true;
-    game.phase = Phase::Playing;
-    world.rebuild(seed);
-    seed
+    let mode_tag = if mode == Mode::Normal { 1 } else { 0 };
+    let world_name = match &load {
+        Some((n, _)) => n.clone(),
+        None => format!("monde-{seed}"),
+    };
+    let handle = server::host_in_background(server::BackgroundOptions {
+        seed,
+        mode: mode_tag,
+        name: "Solo".into(),
+        solo: true,
+        load: load.map(|(_, p)| p),
+        world_name: world_name.clone(),
+    })?;
+    let address = format!("127.0.0.1:{}", handle.port);
+    let token = handle.token;
+    lobby.hosting = Some(handle);
+    lobby.solo = true;
+    lobby.mode = mode;
+    net.connect(&address, name, token)?;
+    lobby.joined_with = address;
+    game.world_name = world_name;
+    game.started = false;
+    game.phase = Phase::Lobby;
+    Ok(seed)
 }
 
 /// Quitte la partie en ligne (ferme le lobby si on l'héberge).
@@ -919,7 +977,14 @@ pub fn create_lobby(
     leave_online(net, lobby, game);
     let seed = game::parse_seed(seed_text).unwrap_or_else(game::random_seed);
     let mode_tag = if mode == Mode::Normal { 1 } else { 0 };
-    let handle = server::host_in_background(seed, mode_tag, format!("Partie de {name}"))?;
+    let handle = server::host_in_background(server::BackgroundOptions {
+        seed,
+        mode: mode_tag,
+        name: format!("Partie de {name}"),
+        solo: false,
+        load: None,
+        world_name: "lobby".into(),
+    })?;
     let address = format!("127.0.0.1:{}", handle.port);
     let token = handle.token;
     lobby.hosting = Some(handle);
@@ -1008,7 +1073,6 @@ pub fn actions(
     actions: Query<&MenuAction, Added<Pressed>>,
     mut state: ResMut<MenuState>,
     mut game: ResMut<GameState>,
-    mut world: ResMut<VoxelWorld>,
     mut net: ResMut<NetClient>,
     mut lobby: ResMut<Lobby>,
     mut settings: ResMut<Settings>,
@@ -1050,11 +1114,30 @@ pub fn actions(
                 }
             }
             MenuAction::Launch => {
-                leave_online(&mut net, &mut lobby, &mut game);
                 let seed_text = field_value(&fields.p0());
-                let seed = start_solo(&mut game, &mut world, &seed_text, state.mode);
-                crate::player::grab(&mut cursor, true);
-                toasts.push(format!("Seed {seed} — bonne destruction !"));
+                let name = field_value(&fields.p2());
+                match launch_solo(&mut net, &mut lobby, &mut game, &name, &seed_text, state.mode, None) {
+                    Ok(_) => crate::player::grab(&mut cursor, true),
+                    Err(e) => state.status = e,
+                }
+            }
+            MenuAction::LoadWorld(i) => {
+                let name = field_value(&fields.p2());
+                if let Some((stem, path)) = state.worlds.get(i).cloned() {
+                    match launch_solo(&mut net, &mut lobby, &mut game, &name, "", state.mode, Some((stem, path))) {
+                        Ok(_) => crate::player::grab(&mut cursor, true),
+                        Err(e) => state.status = e,
+                    }
+                }
+            }
+            MenuAction::SaveWorld => {
+                if net.is_online() {
+                    let text = format!("save {}", game.world_name);
+                    net.send_raw(crate::net::protocol::Packet::Command { text });
+                    toasts.push("Sauvegarde du monde…");
+                } else {
+                    state.status = "Aucune partie à sauvegarder.".into();
+                }
             }
             MenuAction::LobbyMode(mode) => state.lobby_mode = mode,
             MenuAction::CreateLobby | MenuAction::Join | MenuAction::JoinLan(_) => {
@@ -1258,6 +1341,62 @@ pub fn lan_list(
                 });
         }
     });
+}
+
+/// Liste des mondes sauvegardés (onglet Jouer).
+pub fn world_list(
+    game: Res<GameState>,
+    mut state: ResMut<MenuState>,
+    font: Res<UiFont>,
+    mut shown: Local<Option<Vec<(String, u64)>>>,
+    list: Query<Entity, With<WorldList>>,
+    mut commands: Commands,
+) {
+    if game.phase != Phase::Menu || state.tab != Tab::Play {
+        *shown = None;
+        return;
+    }
+    let dir = game::config_dir().map(|d| d.join("saves")).unwrap_or_default();
+    let found = crate::net::save::list(&dir);
+    let current: Vec<(String, u64)> = found.iter().map(|(n, _, t)| (n.clone(), *t)).collect();
+    if shown.as_ref() == Some(&current) {
+        return;
+    }
+    *shown = Some(current.clone());
+    state.worlds = found.into_iter().map(|(n, p, _)| (n, p)).collect();
+    let Ok(list) = list.single() else { return };
+    commands.entity(list).despawn_children();
+    commands.entity(list).with_children(|l| {
+        if state.worlds.is_empty() {
+            l.spawn(ui::text(&font, "Aucun monde sauvegardé pour l'instant.", 15.0, ui::MUTED));
+            return;
+        }
+        for (i, (name, _)) in state.worlds.iter().enumerate().take(6) {
+            let node = Node {
+                width: Val::Percent(100.0),
+                height: px(44.0),
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                padding: UiRect::horizontal(px(14.0)),
+                ..default()
+            };
+            l.spawn((MenuAction::LoadWorld(i), ui::button_with(node, ui::CARD_HOVER)))
+                .with_children(|row| {
+                    row.spawn(ui::text(&font, name.clone(), 17.0, ui::TEXT));
+                    row.spawn(ui::text(&font, "Charger", 14.0, ui::ACCENT));
+                });
+        }
+    });
+}
+
+/// Solo : le serveur privé se met en pause quand le menu est ouvert.
+pub fn solo_pause(game: Res<GameState>, lobby: Res<Lobby>, mut net: ResMut<NetClient>, mut was: Local<bool>) {
+    let paused = lobby.solo && game.started && game.phase != Phase::Playing;
+    if paused != *was && net.is_online() {
+        *was = paused;
+        let text = if paused { "pause on" } else { "pause off" };
+        net.send_raw(crate::net::protocol::Packet::Command { text: text.into() });
+    }
 }
 
 /// Textes du lobby : titre, code, réseau, joueurs.

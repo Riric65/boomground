@@ -8,10 +8,9 @@
 
 use bevy::prelude::*;
 
-use crate::game::{GameState, MAX_HP, RESPAWN_TIME};
+use crate::game::{GameState, MAX_HP};
 use crate::net::client::NetClient;
 use crate::player::{Body, Head, Player, WorldCamera};
-use crate::weapon::Blast;
 use crate::world::VoxelWorld;
 
 /// Particules : 0 tête, 1 poitrine, 2 bassin, 3-4 mains, 5-6 pieds.
@@ -207,36 +206,6 @@ pub fn update_ragdolls(
     }
 }
 
-/// Explosions en solo : blessent le joueur selon la distance.
-pub fn solo_damage(
-    mut blasts: MessageReader<Blast>,
-    net: Res<NetClient>,
-    mut game: ResMut<GameState>,
-    player: Query<&Transform, With<Player>>,
-) {
-    let online = net.is_online();
-    for blast in blasts.read() {
-        if online || blast.force <= 0.0 || !game.alive() || !game.hurt_enabled {
-            continue;
-        }
-        let Ok(t) = player.single() else { continue };
-        let pos = t.translation + Vec3::Y * 0.9;
-        let reach = blast.radius * 2.2 + 1.0;
-        let d = pos.distance(blast.at);
-        if d >= reach {
-            continue;
-        }
-        let amount = 150.0 * (1.0 - d / reach).powf(1.2);
-        game.hp = (game.hp - amount).max(0.0);
-        if game.hp <= 0.0 {
-            let away = (pos - blast.at).normalize_or_zero();
-            game.dead = true;
-            game.respawn_in = RESPAWN_TIME;
-            game.death_push = away * (6.0 + blast.radius * 2.0) + Vec3::Y * 5.0;
-        }
-    }
-}
-
 /// Transitions : début de mort (ragdoll), compte à rebours, réapparition.
 #[allow(clippy::too_many_arguments)]
 pub fn lifecycle(
@@ -285,6 +254,11 @@ pub fn lifecycle(
         if !net.is_online() && game.respawn_in <= 0.0 {
             game.respawn_at = Some(crate::player::spawn_point(&world, None));
         }
+    }
+
+    if let Some(pos) = game.teleport_to.take() {
+        transform.translation = pos;
+        body.vel = Vec3::ZERO;
     }
 
     if let Some(pos) = game.respawn_at.take() {
@@ -336,40 +310,4 @@ pub fn death_camera(
     let look = Transform::from_translation(cam).looking_at(target, Vec3::Y);
     h.translation = rot_inv * (cam - pt.translation);
     h.rotation = rot_inv * look.rotation;
-}
-
-/// Écrasement par un bloc lourd en chute (solo : le serveur ne simule pas
-/// les gravats).
-pub fn crush_damage(
-    time: Res<Time>,
-    net: Res<NetClient>,
-    mut game: ResMut<GameState>,
-    player: Query<&Transform, With<Player>>,
-    blocks: Query<(&Transform, &crate::rubble::Chunk), Without<Player>>,
-    mut cooldown: Local<f32>,
-) {
-    *cooldown -= time.delta_secs();
-    if net.is_online() || !game.alive() || !game.hurt_enabled || *cooldown > 0.0 {
-        return;
-    }
-    let Ok(pt) = player.single() else { return };
-    let lo = pt.translation + Vec3::new(-0.3, 0.0, -0.3);
-    let hi = pt.translation + Vec3::new(0.3, 1.7, 0.3);
-    for (t, chunk) in &blocks {
-        if chunk.sleeping || chunk.vel.y > -5.0 || chunk.mass < 0.7 {
-            continue;
-        }
-        let (bmin, bmax) = crate::rubble::aabb(t, chunk);
-        if bmin.cmplt(hi).all() && bmax.cmpgt(lo).all() {
-            let amount = (chunk.mass * -chunk.vel.y * 1.6).min(90.0);
-            game.hp = (game.hp - amount).max(0.0);
-            *cooldown = 0.4;
-            if game.hp <= 0.0 {
-                game.dead = true;
-                game.respawn_in = RESPAWN_TIME;
-                game.death_push = chunk.vel * 0.3;
-            }
-            return;
-        }
-    }
 }

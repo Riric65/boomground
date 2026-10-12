@@ -11,6 +11,10 @@ use bevy::prelude::*;
 use crate::world::mat::*;
 use crate::world::VoxelWorld;
 
+/// Version du générateur : une sauvegarde d'une autre version est refusée
+/// (rejouer son historique sur une autre ville n'aurait aucun sens).
+pub const MAP_VERSION: u32 = 2;
+
 /// Espacement des rues, en cellules.
 const BLOCK: i32 = 64;
 /// Demi-largeur de la chaussée.

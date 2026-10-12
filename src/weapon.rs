@@ -23,7 +23,6 @@ use crate::game::{GameState, Kind, WeaponId};
 use crate::net::client::NetClient;
 use crate::net::protocol::HitKind;
 use crate::player::{Body, Head, Player, WorldCamera};
-use crate::rubble::{self, Chunk, Rubble};
 use crate::world::{self, Damage, VoxelAssets, VoxelWorld};
 
 /// Moment de l'impact dans un coup de marteau (0..1).
@@ -51,7 +50,6 @@ pub struct Blast {
 pub struct Destroyer<'w, 's> {
     pub commands: Commands<'w, 's>,
     pub world: ResMut<'w, VoxelWorld>,
-    pub rubble: ResMut<'w, Rubble>,
     pub assets: Res<'w, VoxelAssets>,
     pub rng: ResMut<'w, Rng>,
     pub bank: Res<'w, SfxBank>,
@@ -67,7 +65,6 @@ impl Destroyer<'_, '_> {
     pub fn hit(&mut self, at: Vec3, radius: f32, normal: Vec3, debris: usize) -> Damage {
         let d = world::damage(
             &mut self.world,
-            &mut self.rubble,
             &mut self.commands,
             &self.assets,
             &mut self.rng,
@@ -75,7 +72,6 @@ impl Destroyer<'_, '_> {
             radius,
             debris,
             normal * 3.0,
-            !self.net.is_online(),
         );
         self.game.reward(d.value);
         if d.glass {
@@ -96,7 +92,6 @@ impl Destroyer<'_, '_> {
     pub fn explode(&mut self, at: Vec3, radius: f32, send: bool) {
         let d = world::damage(
             &mut self.world,
-            &mut self.rubble,
             &mut self.commands,
             &self.assets,
             &mut self.rng,
@@ -104,7 +99,6 @@ impl Destroyer<'_, '_> {
             radius,
             40,
             Vec3::Y * (2.0 + radius),
-            !self.net.is_online(),
         );
         self.game.reward(d.value);
         self.effects(at, radius);
@@ -721,6 +715,9 @@ pub fn act(
                 hands.reload = spec.reload;
                 hands.reload_total = spec.reload;
                 d.sound(SfxKind::Reload, 0.7, origin);
+                if online {
+                    d.net.send_raw(crate::net::protocol::Packet::Reload);
+                }
                 return;
             }
             if !trigger || hands.cooldown > 0.0 {
@@ -731,6 +728,9 @@ pub fn act(
                     hands.reload = spec.reload;
                     hands.reload_total = spec.reload;
                     d.sound(SfxKind::Reload, 0.7, origin);
+                if online {
+                    d.net.send_raw(crate::net::protocol::Packet::Reload);
+                }
                 } else if clicked {
                     d.sound(SfxKind::Empty, 0.6, origin);
                 }
@@ -755,6 +755,9 @@ pub fn act(
             d.shake.add(if heavy { 0.3 } else { 0.1 });
 
             if id == WeaponId::Rocket {
+                if online {
+                    d.net.send_raw(crate::net::protocol::Packet::Throw { weapon: id.tag() });
+                }
                 let (mesh, material) = bomb_assets.get(id).clone();
                 d.commands.spawn((
                     Bomb {
@@ -780,6 +783,7 @@ pub fn act(
                 return;
             }
 
+            d.net.shot = d.net.shot.wrapping_add(1);
             for _ in 0..spec.pellets {
                 let pdir = spread_dir(dir, right, up, spec.spread, &mut d.rng);
                 let mut from = origin;
@@ -833,6 +837,9 @@ pub fn act(
             hands.cooldown = spec.cooldown;
             hands.swing = Some(0.0);
             d.sound(SfxKind::Swing, 0.4, origin);
+            if online {
+                d.net.send_raw(crate::net::protocol::Packet::Throw { weapon: id.tag() });
+            }
             let (mesh, material) = bomb_assets.get(id).clone();
             let speed = if id == WeaponId::Grenade { 17.0 } else { 14.0 };
             d.commands.spawn((
@@ -1041,13 +1048,11 @@ pub fn update_bombs(
 /// réaction en chaîne.
 pub fn blast_effects(
     mut blasts: MessageReader<Blast>,
-    mut rubble_blocks: Query<(&Transform, &mut Chunk)>,
     mut player: Query<(&Transform, &mut Body), With<Player>>,
     mut bombs: Query<(&Transform, &mut Bomb)>,
     mut shake: ResMut<Shake>,
 ) {
     for blast in blasts.read() {
-        rubble::wake_near(&mut rubble_blocks, blast.at, blast.radius, blast.force);
         if blast.force <= 0.0 {
             continue;
         }

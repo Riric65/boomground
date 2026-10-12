@@ -18,6 +18,7 @@ pub mod perf;
 pub mod player;
 pub mod rubble;
 pub mod shop;
+pub mod sim;
 pub mod ui;
 pub mod vitals;
 pub mod vmesh;
@@ -41,7 +42,7 @@ pub fn run() {
         .insert_resource(game::load_settings())
         .init_resource::<VoxelWorld>()
         .init_resource::<debris::Rng>()
-        .init_resource::<rubble::Rubble>()
+        .init_resource::<net::mirror::Mirror>()
         .init_resource::<vmesh::ChunkEntities>()
         .init_resource::<GameState>()
         .init_resource::<fx::Shake>()
@@ -104,6 +105,8 @@ pub fn run() {
                 menu::flow,
                 menu::settings_panel,
                 menu::lan_list,
+                menu::world_list,
+                menu::solo_pause,
                 menu::lobby_screen,
                 menu::status_text,
                 shop::toggle,
@@ -128,8 +131,6 @@ pub fn run() {
                 debug::pose.run_if(debug::enabled),
                 player::look,
                 player::move_player.run_if(in_game),
-                vitals::solo_damage,
-                vitals::crush_damage,
                 vitals::lifecycle,
                 vitals::update_ragdolls,
                 vitals::death_camera,
@@ -148,8 +149,7 @@ pub fn run() {
         .add_systems(
             Update,
             (
-                rubble::wake_unsupported,
-                rubble::update.run_if(in_game),
+                net::mirror::smooth,
                 debris::update_debris.run_if(in_game),
                 fx::fade_flashes,
                 fx::update_fireballs,

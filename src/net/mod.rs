@@ -8,8 +8,12 @@
 //! réseau local (`lan`) et ouvre le port de la box (`upnp`).
 
 pub mod client;
+pub mod conf;
 pub mod lan;
+pub mod logger;
+pub mod mirror;
 pub mod protocol;
+pub mod save;
 pub mod server;
 pub mod upnp;
 

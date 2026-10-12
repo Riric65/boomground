@@ -38,9 +38,21 @@ impl Default for Options {
     }
 }
 
+/// Fichier qui contient le jeu : l'AppImage elle-même (variable `APPIMAGE`)
+/// quand on en vient, sinon l'exécutable courant. C'est ce qu'on copie à
+/// l'installation, pour que le raccourci relance l'AppImage complète.
+fn source_exe() -> Result<PathBuf, String> {
+    if let Some(p) = std::env::var_os("APPIMAGE").map(PathBuf::from) {
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    std::env::current_exe().map_err(|e| e.to_string())
+}
+
 /// Le jeu tourne-t-il depuis son emplacement installé ?
 pub fn is_installed_copy() -> bool {
-    let (Ok(me), Ok(target)) = (std::env::current_exe(), platform::exe_path()) else {
+    let (Ok(me), Ok(target)) = (source_exe(), platform::exe_path()) else {
         return false;
     };
     same_file(&me, &target)
@@ -84,7 +96,7 @@ pub fn install_dir() -> String {
 /// Copie le jeu à sa place et crée raccourcis / menus. Renvoie le chemin de
 /// l'exécutable installé et d'éventuels avertissements.
 pub fn install(options: Options) -> Result<(PathBuf, Vec<String>), String> {
-    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    let me = source_exe()?;
     let target = platform::exe_path()?;
     if !same_file(&me, &target) {
         if let Some(dir) = target.parent() {

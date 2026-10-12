@@ -19,7 +19,7 @@ pub const DEFAULT_PORT: u16 = 28431;
 pub const DISCOVERY_PORT: u16 = 28432;
 /// Version du protocole : deux versions différentes refusent de jouer
 /// ensemble (message clair plutôt que des paquets incompréhensibles).
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 /// Nombre maximal de joueurs dans une partie.
 pub const MAX_PLAYERS: usize = 16;
 
@@ -55,6 +55,8 @@ pub enum Packet {
         origin: Vec3,
         dir: Vec3,
         blast: f32,
+        /// Numéro du tir (les plombs d'un même tir le partagent).
+        shot: u16,
     },
     /// Serveur → client : voxels réellement détruits (autorité).
     /// `rubble` : faut-il créer des gravats (pas pour l'historique envoyé à
@@ -91,6 +93,59 @@ pub enum Packet {
     Died { id: u16, at: Vec3, push: Vec3 },
     /// Serveur → clients : un joueur réapparaît.
     Respawned { id: u16, pos: Vec3 },
+    /// Serveur → client : déplacement forcé (correction anti-triche,
+    /// chargement d'une sauvegarde) sans toucher aux points de vie.
+    Teleport { pos: Vec3 },
+    /// Serveur → clients : nouveaux blocs de gravats.
+    Blocks { list: Vec<BlockInfo> },
+    /// Serveur → clients : blocs en mouvement `(id, position, lacet)`.
+    BlockPose { list: Vec<(u32, Vec3, f32)> },
+    /// Serveur → clients : blocs disparus.
+    BlockRemove { ids: Vec<u32> },
+    /// Serveur → clients : corps rigide (grille compressée, en morceaux).
+    BodyDef {
+        id: u32,
+        dims: [u16; 3],
+        com: Vec3,
+        part: u16,
+        total: u16,
+        data: Vec<u8>,
+    },
+    /// Serveur → clients : positions des corps `(id, centre de masse, rotation)`.
+    BodyPose { list: Vec<(u32, Vec3, [f32; 4])> },
+    /// Serveur → clients : un corps s'est figé ou a disparu.
+    BodyRemove { id: u32 },
+    /// Serveur → client : inventaire autoritaire.
+    Inv { money: u32, earned: u32, slots: Vec<[u32; 3]> },
+    /// Client → serveur : recharge l'arme en main.
+    Reload,
+    /// Client → serveur : achat d'une arme (`ammo` = paquet de munitions).
+    Buy { weapon: u8, ammo: bool },
+    /// Client → serveur : bombe lancée ou roquette tirée.
+    Throw { weapon: u8 },
+    /// Serveur → client : message à afficher.
+    Notice { text: String },
+    /// Serveur → client : expulsé (puis la connexion est fermée).
+    Kicked { reason: String },
+    /// Serveur → clients : impact violent (son, poussière).
+    Impact { at: Vec3, power: f32 },
+    /// Client (hôte) → serveur : commande (`save nom`, `reset 1234`,
+    /// `pause on`…).
+    Command { text: String },
+    /// Serveur → clients : nouvelle carte (même seed ou nouvelle).
+    Reset { seed: u64 },
+    /// Client → serveur : état du jeu en pause (solo).
+    Ping,
+}
+
+/// Un bloc de gravats annoncé aux clients.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockInfo {
+    pub id: u32,
+    pub pos: Vec3,
+    pub half: Vec3,
+    pub yaw: f32,
+    pub mat: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +182,9 @@ impl Writer {
         self.0.push(v);
     }
     fn u16(&mut self, v: u16) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn u32(&mut self, v: u32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
     fn u64(&mut self, v: u64) {
@@ -195,12 +253,14 @@ impl Packet {
                 origin,
                 dir,
                 blast,
+                shot,
             } => {
                 w.u8(3);
                 w.u8(kind.tag());
                 w.vec3(*origin);
                 w.vec3(*dir);
                 w.f32(*blast);
+                w.u16(*shot);
             }
             Packet::Voxels { cells, rubble } => {
                 w.u8(4);
@@ -295,6 +355,114 @@ impl Packet {
                 w.u16(*id);
                 w.vec3(*pos);
             }
+            Packet::Teleport { pos } => {
+                w.u8(19);
+                w.vec3(*pos);
+            }
+            Packet::Blocks { list } => {
+                w.u8(20);
+                w.u16(list.len() as u16);
+                for b in list {
+                    w.u32(b.id);
+                    w.vec3(b.pos);
+                    w.vec3(b.half);
+                    w.f32(b.yaw);
+                    w.u8(b.mat);
+                }
+            }
+            Packet::BlockPose { list } => {
+                w.u8(21);
+                w.u16(list.len() as u16);
+                for (id, pos, yaw) in list {
+                    w.u32(*id);
+                    w.vec3(*pos);
+                    w.f32(*yaw);
+                }
+            }
+            Packet::BlockRemove { ids } => {
+                w.u8(22);
+                w.u16(ids.len() as u16);
+                for id in ids {
+                    w.u32(*id);
+                }
+            }
+            Packet::BodyDef {
+                id,
+                dims,
+                com,
+                part,
+                total,
+                data,
+            } => {
+                w.u8(23);
+                w.u32(*id);
+                for d in dims {
+                    w.u16(*d);
+                }
+                w.vec3(*com);
+                w.u16(*part);
+                w.u16(*total);
+                w.u16(data.len() as u16);
+                w.0.extend_from_slice(data);
+            }
+            Packet::BodyPose { list } => {
+                w.u8(24);
+                w.u16(list.len() as u16);
+                for (id, pos, rot) in list {
+                    w.u32(*id);
+                    w.vec3(*pos);
+                    for q in rot {
+                        w.f32(*q);
+                    }
+                }
+            }
+            Packet::BodyRemove { id } => {
+                w.u8(25);
+                w.u32(*id);
+            }
+            Packet::Inv { money, earned, slots } => {
+                w.u8(26);
+                w.u32(*money);
+                w.u32(*earned);
+                w.u8(slots.len().min(255) as u8);
+                for s in slots.iter().take(255) {
+                    w.u32(s[0]);
+                    w.u32(s[1]);
+                    w.u32(s[2]);
+                }
+            }
+            Packet::Reload => w.u8(27),
+            Packet::Buy { weapon, ammo } => {
+                w.u8(28);
+                w.u8(*weapon);
+                w.u8(*ammo as u8);
+            }
+            Packet::Throw { weapon } => {
+                w.u8(29);
+                w.u8(*weapon);
+            }
+            Packet::Notice { text } => {
+                w.u8(30);
+                w.string(text);
+            }
+            Packet::Kicked { reason } => {
+                w.u8(31);
+                w.string(reason);
+            }
+            Packet::Impact { at, power } => {
+                w.u8(32);
+                w.vec3(*at);
+                w.f32(*power);
+            }
+            Packet::Command { text } => {
+                w.u8(33);
+                w.string(text);
+            }
+            Packet::Reset { seed } => {
+                w.u8(34);
+                w.u64(*seed);
+            }
+            Packet::Ping => w.u8(35),
         }
 
         let body = w.0;
@@ -330,6 +498,7 @@ impl Packet {
                 origin: cur.vec3()?,
                 dir: cur.vec3()?,
                 blast: cur.f32()?,
+                shot: cur.u16()?,
             },
             4 => {
                 let rubble = cur.u8()? != 0;
@@ -399,6 +568,89 @@ impl Packet {
                 id: cur.u16()?,
                 pos: cur.vec3()?,
             },
+            19 => Packet::Teleport { pos: cur.vec3()? },
+            20 => {
+                let n = cur.u16()?;
+                let mut list = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    list.push(BlockInfo {
+                        id: cur.u32()?,
+                        pos: cur.vec3()?,
+                        half: cur.vec3()?,
+                        yaw: cur.f32()?,
+                        mat: cur.u8()?,
+                    });
+                }
+                Packet::Blocks { list }
+            }
+            21 => {
+                let n = cur.u16()?;
+                let mut list = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    list.push((cur.u32()?, cur.vec3()?, cur.f32()?));
+                }
+                Packet::BlockPose { list }
+            }
+            22 => {
+                let n = cur.u16()?;
+                let mut ids = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    ids.push(cur.u32()?);
+                }
+                Packet::BlockRemove { ids }
+            }
+            23 => {
+                let id = cur.u32()?;
+                let dims = [cur.u16()?, cur.u16()?, cur.u16()?];
+                let com = cur.vec3()?;
+                let part = cur.u16()?;
+                let total = cur.u16()?;
+                let n = cur.u16()? as usize;
+                Packet::BodyDef {
+                    id,
+                    dims,
+                    com,
+                    part,
+                    total,
+                    data: cur.take(n)?.to_vec(),
+                }
+            }
+            24 => {
+                let n = cur.u16()?;
+                let mut list = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    let id = cur.u32()?;
+                    let pos = cur.vec3()?;
+                    list.push((id, pos, [cur.f32()?, cur.f32()?, cur.f32()?, cur.f32()?]));
+                }
+                Packet::BodyPose { list }
+            }
+            25 => Packet::BodyRemove { id: cur.u32()? },
+            26 => {
+                let money = cur.u32()?;
+                let earned = cur.u32()?;
+                let n = cur.u8()?;
+                let mut slots = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    slots.push([cur.u32()?, cur.u32()?, cur.u32()?]);
+                }
+                Packet::Inv { money, earned, slots }
+            }
+            27 => Packet::Reload,
+            28 => Packet::Buy {
+                weapon: cur.u8()?,
+                ammo: cur.u8()? != 0,
+            },
+            29 => Packet::Throw { weapon: cur.u8()? },
+            30 => Packet::Notice { text: cur.string()? },
+            31 => Packet::Kicked { reason: cur.string()? },
+            32 => Packet::Impact {
+                at: cur.vec3()?,
+                power: cur.f32()?,
+            },
+            33 => Packet::Command { text: cur.string()? },
+            34 => Packet::Reset { seed: cur.u64()? },
+            35 => Packet::Ping,
             _ => return None,
         })
     }
@@ -421,6 +673,9 @@ impl<'a> Cursor<'a> {
     }
     fn u16(&mut self) -> Option<u16> {
         Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
+    }
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
     fn u64(&mut self) -> Option<u64> {
         Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
