@@ -223,7 +223,6 @@ pub fn run() {
                 window_icon.run_if(desktop),
                 touch::clear.run_if(touch::on_touch),
                 ui_scale,
-                portrait,
             ),
         )
         .add_systems(Update, chat::update.after(ui::text_fields))
@@ -313,23 +312,4 @@ fn desktop() -> bool {
 #[bevy::prelude::bevy_main]
 fn main() {
     run();
-}
-
-/// Verrouille le jeu en **portrait** sur mobile et garde le canvas à la
-/// bonne taille quand l'utilisateur fait tourner l'appareil.
-///
-/// Android fait aussi le travail dans le manifeste
-/// (`android:screenOrientation="portrait"`), mais ce filet est utile pour
-/// les autres plateformes tactiles et pour la fenêtre de développement.
-fn portrait(mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>) {
-    if !touch::is_touch_platform() {
-        return;
-    }
-    for mut w in &mut windows {
-        if w.resolution.width() > w.resolution.height() {
-            let (w0, h0) = (w.resolution.width(), w.resolution.height());
-            w.resolution.set(h0, w0);
-            w.resolution.set_scale_factor(w0 / h0);
-        }
-    }
 }
