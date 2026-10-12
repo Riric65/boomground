@@ -24,6 +24,7 @@ pub mod rubble;
 pub mod servers;
 pub mod shop;
 pub mod sim;
+pub mod touch;
 pub mod ui;
 pub mod vehicle;
 pub mod vitals;
@@ -69,11 +70,18 @@ pub fn run() {
         .init_resource::<net::client::Lobby>()
         .init_resource::<net::lan::LanBrowser>()
         .init_resource::<ui::Toasts>()
+        .init_resource::<touch::TouchState>()
         .add_message::<weapon::Blast>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: format!("BoomGround {}", install::VERSION),
-                resolution: WindowResolution::new(1440, 810),
+                // Sur mobile on démarre en portrait : le jeu se tient d'une
+                // seule main, joystick à gauche, boutons à droite.
+                resolution: if touch::is_touch_platform() {
+                    WindowResolution::new(540, 960)
+                } else {
+                    WindowResolution::new(1440, 810)
+                },
                 present_mode: PresentMode::AutoVsync,
                 // Les tests automatiques ne volent pas le clavier.
                 focused: !debug::enabled(),
@@ -82,6 +90,9 @@ pub fn run() {
                 } else {
                     bevy::window::WindowLevel::Normal
                 },
+                // Le terrain de jeu occupe tout l'écran, sans barre de titre
+                // ni bord : indispensable sur un téléphone.
+                decorations: !touch::is_touch_platform(),
                 ..default()
             }),
             ..default()
@@ -101,6 +112,7 @@ pub fn run() {
                 weapon::setup_viewmodels,
                 setup_scene,
                 hud::setup,
+                touch::setup,
                 menu::setup,
                 shop::setup,
                 ui::setup_toasts,
@@ -118,6 +130,14 @@ pub fn run() {
                 debug::force_playing.run_if(debug::enabled),
                 debug::autopilot.run_if(debug::enabled),
                 debug::overview.run_if(debug::enabled),
+                // Le tactile est lu **avant** tout le reste : le regard, le
+                // déplacement et le tir consomment ces valeurs la même
+                // image. Rien ne tourne sur ordinateur : les zones tactiles
+                // sont des nœuds plein écran « pickables » qui avalerait la
+                // souris si elles restaient présentes.
+                touch::pointer.run_if(touch::on_touch),
+                touch::fire_button.run_if(touch::on_touch),
+                touch::layout.run_if(touch::on_touch),
                 ui::text_fields,
                 ui::switches,
                 menu::actions,
@@ -201,7 +221,9 @@ pub fn run() {
                 menu::server_list_ui,
                 menu::map_size_highlight,
                 window_icon,
+                touch::clear.run_if(touch::on_touch),
                 ui_scale,
+                portrait,
             ),
         )
         .add_systems(Update, chat::update.after(ui::text_fields))
@@ -276,5 +298,32 @@ fn ui_scale(window: Query<&Window, With<bevy::window::PrimaryWindow>>, mut scale
     let s = (w.width() / 1440.0).min(w.height() / 810.0).clamp(0.55, 2.4);
     if (scale.0 - s).abs() > 0.01 {
         scale.0 = s;
+    }
+}
+
+/// Point d'entrée Android : `#[bevy_main]` exporte `android_main`, que
+/// l'activité Java appelle après avoir chargé `libboomground.so`.
+#[cfg(target_os = "android")]
+#[bevy::prelude::bevy_main]
+fn main() {
+    run();
+}
+
+/// Verrouille le jeu en **portrait** sur mobile et garde le canvas à la
+/// bonne taille quand l'utilisateur fait tourner l'appareil.
+///
+/// Android fait aussi le travail dans le manifeste
+/// (`android:screenOrientation="portrait"`), mais ce filet est utile pour
+/// les autres plateformes tactiles et pour la fenêtre de développement.
+fn portrait(mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>) {
+    if !touch::is_touch_platform() {
+        return;
+    }
+    for mut w in &mut windows {
+        if w.resolution.width() > w.resolution.height() {
+            let (w0, h0) = (w.resolution.width(), w.resolution.height());
+            w.resolution.set(h0, w0);
+            w.resolution.set_scale_factor(w0 / h0);
+        }
     }
 }

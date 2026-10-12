@@ -36,13 +36,20 @@ pub const EYE: f32 = 1.6;
 const HALF_W: f32 = 0.3;
 /// Hauteur de la boîte de collision.
 pub const HEIGHT: f32 = 1.7;
-/// Hauteur de marche franchie sans sauter (un voxel + marge).
-const STEP: f32 = 0.45;
+/// Hauteur de marche franchie sans sauter : 1,5 voxel (0,6 m) plus une petite
+/// marge, pour monter les trottoirs et les escaliers d'un seul tenant.
+pub const STEP: f32 = 0.62;
 const WALK: f32 = 5.0;
 const RUN: f32 = 8.5;
 const FLY: f32 = 16.0;
 const GRAVITY: f32 = 22.0;
 const JUMP: f32 = 7.5;
+
+/// Anticrénelage au démarrage. `BOOM_MSAA=0` le désactive (utile sur un
+/// rendu logiciel, où le multi-échantillonnage coûte très cher).
+fn msaa() -> bool {
+    !std::env::var("BOOM_MSAA").is_ok_and(|v| v == "0")
+}
 
 #[derive(Component)]
 pub struct Player;
@@ -93,7 +100,7 @@ pub fn spawn_player(mut commands: Commands, world: Res<VoxelWorld>) {
                     SpatialListener::default(),
                     Camera3d::default(),
                     Hdr,
-                    if std::env::var("BOOM_MSAA").is_ok_and(|v| v == "0") { Msaa::Off } else { Msaa::Sample4 },
+                    if msaa() { Msaa::Sample4 } else { Msaa::Off },
                     Tonemapping::TonyMcMapface,
                     grading(),
                     Bloom {
@@ -143,17 +150,24 @@ pub fn spawn_player(mut commands: Commands, world: Res<VoxelWorld>) {
     ));
 }
 
-/// Point d'apparition d'un joueur : autour du carrefour central, décalé
-/// selon son numéro pour que les joueurs en ligne n'apparaissent pas les uns
-/// dans les autres.
+/// Point d'apparition d'un joueur : **côté serveur**, on le tire au hasard
+/// sur un trottoir de la ville (`salt` rend le tirage différent pour chaque
+/// joueur, et reproductible pour un même couple *seed*, *sel*).
+///
+/// Le repli sur l'ancien point central sert aux tout premiers appels, quand
+/// la carte n'est pas encore générée ou ne contient aucun trottoir libre.
 pub fn spawn_point(world: &VoxelWorld, id: Option<u16>) -> Vec3 {
-    match id {
-        Some(id) if id > 0 => {
-            let a = id as f32 * 2.4;
-            world.spawn + Vec3::new(a.cos(), 0.0, a.sin()) * 1.8
-        }
-        _ => world.spawn,
-    }
+    let salt = id.unwrap_or(0) as u64 + 1;
+    crate::map::random_sidewalk(world, salt).unwrap_or(world.spawn)
+}
+
+/// Point d'apparition tiré au hasard à chaque appel (serveur) : un trottoir
+/// différent à chaque connexion et à chaque réapparition.
+pub fn random_spawn(world: &VoxelWorld) -> Vec3 {
+    let salt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    crate::map::random_sidewalk(world, salt).unwrap_or(world.spawn)
 }
 
 /// Remet le joueur au point d'apparition quand la carte est régénérée.
@@ -180,11 +194,31 @@ pub fn look(
     shop: Res<crate::shop::ShopState>,
     mouse: Res<AccumulatedMouseMotion>,
     buttons: Res<ButtonInput<MouseButton>>,
+    touch: Res<crate::touch::TouchState>,
     mut cursor: Single<&mut CursorOptions>,
     mut player: Query<(&mut Transform, &mut Body), With<Player>>,
     mut head: Query<&mut Transform, (With<Head>, Without<Player>)>,
 ) {
     if shop.open || !game.alive() {
+        return;
+    }
+    // Sur mobile : pas de curseur, le regard vient du glissement du doigt.
+    if crate::touch::is_touch_platform() {
+        let delta = touch.look;
+        if delta == Vec2::ZERO {
+            return;
+        }
+        let Ok((mut transform, mut body)) = player.single_mut() else {
+            return;
+        };
+        let Ok(mut head_transform) = head.single_mut() else {
+            return;
+        };
+        let invert = if settings.invert_y { -1.0 } else { 1.0 };
+        body.yaw -= delta.x;
+        body.pitch = (body.pitch - delta.y * invert).clamp(-FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02);
+        transform.rotation = Quat::from_rotation_y(body.yaw);
+        head_transform.rotation = Quat::from_rotation_x(body.pitch);
         return;
     }
     if buttons.just_pressed(MouseButton::Left) && cursor.grab_mode == CursorGrabMode::None {
@@ -241,6 +275,7 @@ pub fn move_player(
     settings: Res<crate::game::Settings>,
     shop: Res<crate::shop::ShopState>,
     net: Res<crate::net::client::NetClient>,
+    touch: Res<crate::touch::TouchState>,
     mut query: Query<(&mut Transform, &mut Body), With<Player>>,
     mut heads: Query<&mut Transform, (With<Head>, Without<Player>)>,
     mut blocks: Query<(&Transform, &mut Chunk), (Without<Player>, Without<Head>)>,
@@ -280,6 +315,11 @@ pub fn move_player(
         }
         if keys.any_pressed([KeyCode::KeyA, KeyCode::ArrowLeft]) {
             wish -= right;
+        }
+        // Joystick tactile : x = droite, y vers le bas de l'écran (= reculer).
+        let m = touch.stick;
+        if m.length() > 0.08 {
+            wish += right * m.x - forward * m.y;
         }
     }
     let running = keys.pressed(KeyCode::ShiftLeft);
@@ -330,7 +370,8 @@ pub fn move_player(
     let fall_speed = -body.vel.y;
     body.vel.y -= GRAVITY * dt;
     let mut jumped = false;
-    if body.grounded && controls && keys.pressed(KeyCode::Space) {
+    // Saut : barre d'espace au clavier, bouton tactile sur mobile.
+    if body.grounded && controls && (keys.pressed(KeyCode::Space) || touch.jump) {
         body.vel.y = JUMP;
         body.grounded = false;
         jumped = true;
@@ -371,12 +412,17 @@ pub fn move_player(
         let mut stepped = false;
         if was_grounded || body.grounded {
             // On essaie la même avancée, une marche plus haut.
+            // Un plafond bas peut écourter la montée : on garde ce qu'on a
+            // pu gagner au lieu d'abandonner.
             let mut up = before;
-            if !world.sweep_with(&mut up, half, 1, STEP, &boxes) {
+            world.sweep_with(&mut up, half, 1, STEP, &boxes);
+            if up.y - before.y > 0.05 {
                 let mut fwd = up;
                 world.sweep_with(&mut fwd, half, axis, delta, &boxes);
                 let gained = (fwd[axis] - before[axis]).abs() - (blocked_at[axis] - before[axis]).abs();
-                if gained > 0.02 {
+                // Seuil minuscule : à haute fréquence d'image l'avancée par
+                // image est faible et un seuil fixe bloquait les marches.
+                if gained > 0.001 {
                     world.sweep_with(&mut fwd, half, 1, -STEP, &boxes);
                     // La caméra rattrape la marche en douceur.
                     body.step = (body.step + (fwd.y - before.y).max(0.0)).min(STEP);

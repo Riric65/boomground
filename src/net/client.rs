@@ -760,20 +760,41 @@ pub fn update_nametags(
     remotes: Query<(&RemotePlayer, &GlobalTransform)>,
     lobby: Res<Lobby>,
     game: Res<GameState>,
+    ui_scale: Res<bevy::ui::UiScale>,
     mut tags: Query<(&NameTag, &mut Node, &mut Visibility, &mut Text, &ComputedNode)>,
 ) {
     let Ok((cam, cam_transform)) = camera.single() else {
         return;
     };
+    // L'interface est mise à l'échelle par `UiScale` : ses coordonnées ne
+    // sont pas les pixels logiques de la fenêtre mais ceux divisés par
+    // l'échelle. Sans cette division les noms partaient en diagonale vers le
+    // coin de l'écran au lieu de rester au-dessus des joueurs.
+    let scale = ui_scale.0.max(0.01);
+    let eye = cam_transform.translation();
+    let forward = cam_transform.forward().normalize_or_zero();
     for (tag, mut node, mut visibility, mut text, computed) in &mut tags {
         let target = remotes.iter().find(|(r, _)| r.id == tag.id);
         let screen = target.and_then(|(_, t)| {
             let head = t.translation() + Vec3::Y * 2.35;
-            let dist = head.distance(cam_transform.translation());
-            if dist > 80.0 {
+            let to = head - eye;
+            let dist = to.length();
+            if dist > 80.0 || dist < 0.4 {
                 return None;
             }
-            cam.world_to_viewport(cam_transform, head).ok()
+            // Derrière la caméra : pas de nom (sinon il se retrouve
+            // projeté par symétrie dans le coin opposé de l'écran).
+            if forward.dot(to / dist) <= 0.1 {
+                return None;
+            }
+            let pos = cam.world_to_viewport(cam_transform, head).ok()?;
+            let Some(rect) = cam.logical_viewport_rect() else {
+                return None;
+            };
+            if pos.x < rect.min.x - 4.0 || pos.x > rect.max.x + 4.0 || pos.y < rect.min.y - 4.0 || pos.y > rect.max.y + 4.0 {
+                return None;
+            }
+            Some(pos)
         });
         let wanted = match screen {
             Some(_) if game.in_game() => Visibility::Inherited,
@@ -782,8 +803,8 @@ pub fn update_nametags(
         visibility.set_if_neq(wanted);
         if let Some(pos) = screen {
             let size = computed.size() * computed.inverse_scale_factor();
-            node.left = px(pos.x - size.x * 0.5);
-            node.top = px(pos.y - size.y);
+            node.left = px(pos.x / scale - size.x * 0.5);
+            node.top = px(pos.y / scale - size.y);
         }
         if let Some((_, name)) = lobby.players.iter().find(|(id, _)| *id == tag.id) {
             if text.0 != *name {

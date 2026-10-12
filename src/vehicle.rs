@@ -14,13 +14,18 @@ use crate::net::protocol::Packet;
 use crate::player::{Body, Head, Player};
 
 /// Voiture la plus proche d'un point (index, distance), à moins de `reach`.
+///
+/// On ne teste plus la présence de voxels à l'emplacement : une voiture déjà
+/// conductible a perdu ses voxels (elle est devenue un corps rigide) et ne
+/// pouvait donc plus jamais être re-montée, même après en être descendu. Le
+/// serveur reste seul juge : il répond « hors d'usage » si le véhicule a
+/// disparu ou est trop abîmé.
 pub fn nearest_car(world: &crate::world::VoxelWorld, from: Vec3, reach: f32) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
     for (i, &min) in world.cars.iter().enumerate() {
         let c = world.cell_center(min + IVec3::new(2, 3, 5));
         let d = c.distance(from);
-        // Une voiture déjà en pièces n'a plus de voxels à son emplacement.
-        if d < reach && best.is_none_or(|(_, bd)| d < bd) && world.is_solid(min + IVec3::new(2, 1, 5)) {
+        if d < reach && best.is_none_or(|(_, bd)| d < bd) {
             best = Some((i, d));
         }
     }
@@ -40,11 +45,12 @@ pub fn controls(
     mirror: Res<Mirror>,
     bodies: Query<&NetBody>,
     mut timer: Local<f32>,
+    touch: Res<crate::touch::TouchState>,
 ) {
     if game.driving == 0 || game.phase != Phase::Playing || game.typing {
         return;
     }
-    if keys.just_pressed(KeyCode::KeyF) {
+    if keys.just_pressed(KeyCode::KeyF) || touch.interact {
         net.send_raw(Packet::Exit);
         return;
     }
@@ -64,13 +70,21 @@ pub fn controls(
     let axis = |plus: &[KeyCode], minus: &[KeyCode]| -> i8 {
         i8::from(keys.any_pressed(plus.iter().copied())) - i8::from(keys.any_pressed(minus.iter().copied()))
     };
-    let throttle = axis(&[KeyCode::KeyW, KeyCode::ArrowUp], &[KeyCode::KeyS, KeyCode::ArrowDown]);
+    let mut throttle = axis(&[KeyCode::KeyW, KeyCode::ArrowUp], &[KeyCode::KeyS, KeyCode::ArrowDown]);
     // Gauche = rotation positive autour de Y.
-    let steer = axis(&[KeyCode::KeyA, KeyCode::ArrowLeft], &[KeyCode::KeyD, KeyCode::ArrowRight]);
+    let mut steer = axis(&[KeyCode::KeyA, KeyCode::ArrowLeft], &[KeyCode::KeyD, KeyCode::ArrowRight]);
+    // Joystick tactile (y vers le bas de l'écran = marche arrière).
+    let stick = touch.stick;
+    if stick.y.abs() > 0.3 {
+        throttle = if stick.y < 0.0 { 1 } else { -1 };
+    }
+    if stick.x.abs() > 0.3 {
+        steer = if stick.x < 0.0 { 1 } else { -1 };
+    }
     net.send_raw(Packet::Drive {
         throttle,
         steer,
-        brake: keys.pressed(KeyCode::Space),
+        brake: keys.pressed(KeyCode::Space) || touch.fire,
     });
 }
 

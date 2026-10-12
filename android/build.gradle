@@ -1,0 +1,70 @@
+// Projet Gradle minimal pour l'APK BoomGround (Android / GrapheneOS).
+//
+// On n'utilise pas cargo-apk : le projet est déclaré à la main, ce qui
+// donne le contrôle sur le manifeste (orientation portrait forcée,
+// permissions justifiées) et évite une dépendance de plus sur le runner.
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.5.2'
+    }
+}
+
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'xyz.boomground.game'
+    compileSdk 34
+    ndkVersion '26.1.10909125'
+
+    defaultConfig {
+        applicationId 'xyz.boomground.game'
+        minSdk 26
+        targetSdk 34
+        versionCode 10505
+        versionName '1.5.5'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    // La bibliothèque Rust est chargée telle quelle par NativeActivity.
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+}
+
+// Compilation des trois cibles Android puis copie des .so dans jniLibs.
+tasks.register('cargoBuild', Exec) {
+    workingDir "${projectDir}/.."
+    commandLine 'bash', 'android/build-apk.sh'
+}
+
+tasks.configureEach { task ->
+    if (task.name.startsWith('assemble') || task.name == 'bundle') {
+        task.dependsOn 'cargoBuild'
+    }
+}

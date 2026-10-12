@@ -65,6 +65,10 @@ pub fn already_installed() -> bool {
 
 /// Faut-il proposer l'installation au démarrage ?
 pub fn should_offer() -> bool {
+    // Sur téléphone, c'est l'APK qui installe le jeu.
+    if cfg!(target_os = "android") {
+        return false;
+    }
     if std::env::args().any(|a| a == "--portable" || a == "--no-install") {
         return false;
     }

@@ -568,6 +568,7 @@ pub fn select(
     keys: Res<ButtonInput<KeyCode>>,
     wheel: Res<AccumulatedMouseScroll>,
     shop: Res<crate::shop::ShopState>,
+    touch: Res<crate::touch::TouchState>,
     mut game: ResMut<GameState>,
     mut hands: ResMut<Hands>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
@@ -577,7 +578,7 @@ pub fn select(
     }
     // Windows envoie la molette à la fenêtre survolée même si elle n'a pas
     // le focus : on l'ignore tant que le jeu n'est pas au premier plan.
-    if window.single().is_ok_and(|w| !w.focused) {
+    if !crate::touch::is_touch_platform() && window.single().is_ok_and(|w| !w.focused) {
         return;
     }
     let owned = game.owned();
@@ -615,13 +616,24 @@ pub fn select(
         }
     }
     // Molette, Q / E : dans la catégorie ; au bout, on passe à la suivante.
-    let step = if wheel.delta.y < -0.5 || keys.just_pressed(KeyCode::KeyE) {
+    // Sur mobile : les boutons ‹ et › de l'écran, plus les pastilles de
+    // catégorie, remplacent tout ça.
+    let step: i32 = if touch.cycle != 0 {
+        touch.cycle as i32
+    } else if wheel.delta.y < -0.5 || keys.just_pressed(KeyCode::KeyE) {
         1
     } else if wheel.delta.y > 0.5 || keys.just_pressed(KeyCode::KeyQ) {
         -1
     } else {
         0
     };
+    if let Some(c) = touch.category {
+        if let Some(&w) = in_cat(c).first() {
+            let remembered = WeaponId(game.last_in_cat[c]);
+            let list = in_cat(c);
+            wanted = if list.contains(&remembered) { remembered } else { w };
+        }
+    }
     if step != 0 {
         let list = in_cat(current);
         let i = list.iter().position(|&w| w == game.weapon).unwrap_or(0) as i32;
@@ -680,6 +692,7 @@ pub fn act(
     bomb_assets: Res<BombAssets>,
     viewmodels: Query<&ViewModel>,
     mut bombs: Query<&mut Bomb>,
+    touch: Res<crate::touch::TouchState>,
     mut d: Destroyer,
 ) {
     let dt = time.delta_secs();
@@ -695,16 +708,19 @@ pub fn act(
     let right = cam.right().as_vec3();
     let up = cam.up().as_vec3();
 
-    let grabbed = cursor.grab_mode != CursorGrabMode::None;
+    let grabbed = cursor.grab_mode != CursorGrabMode::None || crate::touch::is_touch_platform();
     let id = d.game.weapon;
     let spec = id.spec();
-    let pressed = grabbed && hands.equip < 0.5 && buttons.pressed(MouseButton::Left);
-    let clicked = grabbed && hands.equip < 0.5 && buttons.just_pressed(MouseButton::Left);
+    // Le bouton « tir » tactile remplace le clic gauche.
+    let touch_fire = touch.fire;
+    let pressed = grabbed && hands.equip < 0.5 && (buttons.pressed(MouseButton::Left) || touch_fire);
+    let clicked = grabbed && hands.equip < 0.5 && (buttons.just_pressed(MouseButton::Left) || touch_fire);
     let trigger = if spec.auto { pressed } else { clicked };
     let online = d.net.is_online();
 
-    // Interagir (F) : portes.
-    if keys.just_pressed(KeyCode::KeyF) && grabbed {
+    // Interagir (F ou bouton tactile) : voitures et portes.
+    let interact = touch.interact || (keys.just_pressed(KeyCode::KeyF) && grabbed);
+    if interact {
         // Voiture proche : on y monte (en ligne, le serveur décide).
         let car = if d.world.door_at(origin, dir, 3.6).is_none() {
             crate::vehicle::nearest_car(&d.world, origin, 5.5)
@@ -824,7 +840,7 @@ pub fn act(
             }
             let slot = *d.game.slot(id);
             let can_reload = slot.mag < spec.mag && (sandbox || slot.reserve > 0);
-            if keys.just_pressed(KeyCode::KeyR) && can_reload {
+            if (keys.just_pressed(KeyCode::KeyR) || touch.reload) && can_reload {
                 hands.reload = spec.reload;
                 hands.reload_total = spec.reload;
                 d.sound(SfxKind::Reload, 0.7, origin);

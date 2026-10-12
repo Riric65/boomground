@@ -1,2 +1,7 @@
 /target
 /dist
+# Sorties du build Android (les .so sont produits par cargo, pas versionnés)
+android/src/main/jniLibs/
+android/.gradle/
+android/build/
+android/local.properties

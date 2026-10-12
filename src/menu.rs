@@ -103,6 +103,10 @@ pub enum SettingKind {
     ViewDistance,
     Shadows,
     Shake,
+    /// Côté du joystick tactile (mobile).
+    JoystickSide,
+    /// Sensibilité du regard au doigt (mobile).
+    TouchSensitivity,
 }
 
 #[derive(Component)]
@@ -379,15 +383,19 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
         .with_children(|root| {
             // --- Colonne de gauche : logo et navigation ---
             root.spawn(Node {
-                width: px(330.0),
+                // Assez large pour que le logo tienne dans la colonne :
+                // il chevauchait sinon le titre du panneau de droite.
+                width: px(400.0),
                 height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::new(px(40.0), px(30.0), px(56.0), px(32.0)),
                 row_gap: px(8.0),
+                overflow: Overflow::clip(),
+                flex_shrink: 0.0,
                 ..default()
             })
             .with_children(|side| {
-                logo(side, &font, 54.0);
+                logo(side, &font, 46.0);
                 side.spawn((
                     ui::text(&font, "Tout est destructible.", 16.0, ui::MUTED),
                     Node {
@@ -617,7 +625,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
 
                             // --- Rejoindre ---
                             let mut join = card_node(400.0);
-                            join.min_height = px(380.0);
+                            join.min_height = px(360.0);
                             row.spawn((ui::card(), shadow()))
                                 .insert(join)
                                 .with_children(|c| {
@@ -650,7 +658,10 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                                         Node {
                                             flex_direction: FlexDirection::Column,
                                             row_gap: px(6.0),
-                                            min_height: px(100.0),
+                                            // Juste la hauteur d'une ligne :
+                                            // le vide parqué ici repoussait
+                                            // le champ de code vers le bas.
+                                            min_height: px(24.0),
                                             ..default()
                                         },
                                     ));
@@ -698,6 +709,11 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                                 setting_row(c, &font, "Secousses de caméra", SettingKind::Shake);
                                 switch_row(c, &font, "Inverser l'axe vertical", settings.invert_y, InvertSwitch);
                                 switch_row(c, &font, "Balancement à la marche", settings.head_bob, BobSwitch);
+                                if crate::touch::is_touch_platform() {
+                                    c.spawn(ui::text(&font, "ÉCRAN TACTILE", 13.0, ui::MUTED));
+                                    setting_row(c, &font, "Côté du joystick", SettingKind::JoystickSide);
+                                    setting_row(c, &font, "Sensibilité du regard", SettingKind::TouchSensitivity);
+                                }
                                 c.spawn(ui::text(&font, "SON", 13.0, ui::MUTED));
                                 setting_row(c, &font, "Volume général", SettingKind::Volume);
                                 setting_row(c, &font, "Bruitages", SettingKind::Sfx);
@@ -1337,13 +1353,15 @@ pub fn actions(
                         }
                     }
                     SettingKind::Msaa => {
-                        settings.msaa = match (settings.msaa, dir > 0) {
-                            (0, true) => 2,
-                            (2, true) => 4,
-                            (4, true) => 0,
-                            (0, false) => 4,
-                            (2, false) => 0,
-                            _ => 2,
+                        // Seulement « aucun » et « 4× » : le 2× n'est
+                        // garanti par aucun pilote et fait planter WebGPU
+                        // sur les adaptateurs logiciels (llvmpipe).
+                        settings.msaa = if settings.msaa == 0 {
+                            if dir > 0 { 4 } else { 0 }
+                        } else if dir > 0 {
+                            0
+                        } else {
+                            4
                         }
                     }
                     SettingKind::Particles => {
@@ -1363,6 +1381,10 @@ pub fn actions(
                         settings.shadows = (settings.shadows as i32 + dir as i32).clamp(0, 2) as u8
                     }
                     SettingKind::Shake => settings.shake += 0.25 * d,
+                    SettingKind::JoystickSide => {
+                        settings.joystick_side = (settings.joystick_side as i32 + dir as i32).rem_euclid(2) as u8
+                    }
+                    SettingKind::TouchSensitivity => settings.touch_sensitivity *= if dir > 0 { 1.15 } else { 1.0 / 1.15 },
                     SettingKind::Fps => {
                         settings.fps_limit = match (settings.fps_limit <= 0.0, dir > 0) {
                             (true, true) => 0.0,
@@ -1599,7 +1621,10 @@ pub fn server_list_ui(
                     b.spawn(ui::text(&font, detail, 12.0, color));
                 });
                 row.spawn((MenuAction::RemoveServer(i), ui::button(38.0, 52.0, Color::srgba(0.35, 0.08, 0.08, 0.85))))
-                    .with_child(ui::label(&font, "✕", 16.0, ui::TEXT));
+                    // « × » (U+00D7) et non « ✕ » (U+2715) : ce dernier
+                    // n'existe pas dans la police embarquée et s'affichait
+                    // en carré vide.
+                    .with_child(ui::label(&font, "×", 26.0, ui::TEXT));
             });
         }
     });
@@ -1816,11 +1841,7 @@ pub fn settings_panel(
     }
     crate::fx::set_sfx_scale(settings.sfx);
     density.0 = settings.particles;
-    let msaa = match settings.msaa {
-        0 => Msaa::Off,
-        2 => Msaa::Sample2,
-        _ => Msaa::Sample4,
-    };
+    let msaa = if settings.msaa == 0 { Msaa::Off } else { Msaa::Sample4 };
     for (_, mut m) in &mut cameras {
         if *m != msaa {
             *m = msaa;
@@ -1875,6 +1896,8 @@ pub fn settings_panel(
             SettingKind::ViewDistance => format!("{:.0} m", settings.view_distance),
             SettingKind::Shadows => ["aucune", "moyenne", "haute"][settings.shadows.min(2) as usize].to_string(),
             SettingKind::Shake => format!("{:.0} %", settings.shake * 100.0),
+            SettingKind::JoystickSide => ["gauche", "droite"][settings.joystick_side.min(1) as usize].to_string(),
+            SettingKind::TouchSensitivity => format!("{:.0} %", settings.touch_sensitivity / 0.005 * 100.0),
             SettingKind::Fps => {
                 if settings.fps_limit <= 0.0 {
                     "écran".to_string()

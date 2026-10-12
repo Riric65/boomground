@@ -615,8 +615,20 @@ impl VoxelWorld {
 
     /// Hauteur (monde) du dessus du voxel le plus haut sous `(x, z)`.
     pub fn ground_height(&self, x: f32, z: f32) -> f32 {
+        self.ground_height_below(x, z, f32::INFINITY)
+    }
+
+    /// Comme [`Self::ground_height`], mais en ignorant tout ce qui dépasse
+    /// `max_y`.
+    ///
+    /// Indispensable pour poser un joueur au sol : sans cette limite, la
+    /// recherche remontait la colonne jusqu'au toit et teleportait le joueur
+    /// 25 m plus haut, sur le toit d'un immeuble, dès qu'il sortait d'une
+    /// voiture garée à côté.
+    pub fn ground_height_below(&self, x: f32, z: f32, max_y: f32) -> f32 {
         let c = self.world_to_cell(Vec3::new(x, 0.0, z));
-        for y in (0..self.dims.y).rev() {
+        let top = self.world_to_cell(Vec3::new(x, max_y, z)).y.min(self.dims.y - 1);
+        for y in (0..=top.max(0)).rev() {
             if self.is_solid(IVec3::new(c.x, y, c.z)) {
                 return self.cell_max(IVec3::new(c.x, y, c.z)).y;
             }

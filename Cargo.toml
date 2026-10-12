@@ -1,6 +1,6 @@
 [package]
 name = "boomground"
-version = "1.5.0"
+version = "1.5.5"
 edition = "2021"
 description = "Destruction de voxels en bac à sable ou en mode boutique."
 license-file = "LICENSE"
@@ -42,6 +42,11 @@ opt-level = 3
 lto = "thin"
 strip = true
 panic = "abort"
+
+# Android : Bevy n'active aucune activité par défaut ; l'APK utilise la
+# `NativeActivity` du système (pas de dépendance Java supplémentaire).
+[target.'cfg(target_os = "android")'.dependencies]
+bevy = { version = "0.20", features = ["android-native-activity"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

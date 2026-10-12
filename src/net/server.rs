@@ -46,6 +46,12 @@ const REFILL_PER_SEC: f32 = 30.0;
 const MAX_OUTBOX: usize = 8 << 20;
 /// Octets de grille par paquet `BodyDef`.
 const BODY_PART: usize = 30_000;
+/// Fenêtre d'anti-rebond de l'anti-triche : un même motif n'est compté
+/// qu'une fois par tranche de deux secondes (les états arrivent à 20 Hz).
+const FLAG_WINDOW: Duration = Duration::from_secs(2);
+/// Au-delà de ce nombre de refus **consécutifs**, une suspicion est notée :
+/// avant, le moindre état isolé suffisait à déclencher le compteur.
+const STRIKE_AFTER: u32 = 5;
 
 /// Réglages d'une partie hébergée.
 #[derive(Clone, Debug)]
@@ -165,6 +171,8 @@ struct Client {
     pending: Vec<(f32, Instant, WeaponId)>,
     /// Anti-triche : points de suspicion, état de vol / chute.
     strikes: f32,
+    /// Dernière suspicion notée (anti-rebond).
+    flag_at: Option<Instant>,
     last_valid: Vec3,
     airborne_since: Option<Instant>,
     fall_speed: f32,
@@ -360,6 +368,7 @@ fn new_client(stream: TcpStream, addr: IpAddr, rules: &Rules, mode: u8) -> Clien
         reload_until: None,
         pending: Vec::new(),
         strikes: 0.0,
+        flag_at: None,
         last_valid: Vec3::ZERO,
         airborne_since: None,
         fall_speed: 0.0,
@@ -841,7 +850,13 @@ fn flush_events(server: &mut ServerState) {
                     }
                 }
             }
-            SimEvent::BodyRemoved(id) => broadcast(server, None, &Packet::BodyRemove { id }),
+            SimEvent::BodyRemoved(id) => {
+                broadcast(server, None, &Packet::BodyRemove { id });
+                // Le corps n'existe plus : son entrée dans la table des
+                // véhicules devient inutile (sinon l'emplacement restait
+                // définitivement « hors d'usage »).
+                server.car_bodies.retain(|_, b| *b != id);
+            }
             SimEvent::WorldRemoved(cells) => broadcast_removed(server, &cells),
             SimEvent::WorldPlaced(edits) => broadcast_placed(server, &edits),
             SimEvent::Impact { at, power } => {
@@ -1162,14 +1177,26 @@ fn take_token(client: &mut Client, cost: f32) -> bool {
 }
 
 /// Note un comportement suspect ; expulse si le total dépasse le seuil.
+///
+/// Les états et les tirs arrivent à 20 Hz : sans anti-rebond, un simple à-coup
+/// réseau (ou un joueur qui traverse un gravat) notait 20 points par seconde
+/// et expulsait un joueur innocent en trois secondes. Un motif n'est donc
+/// compté **qu'une fois par fenêtre de [`FLAG_WINDOW`]**, et le compteur se
+/// vide avec le temps (voir `serve`).
 fn suspect(server: &mut ServerState, id: u16, points: f32, why: &str) {
     let level = server.config.rules.anticheat;
     if level == 0 {
         return;
     }
-    let limit = if level >= 2 { 25.0 } else { 60.0 };
+    let limit = if level >= 2 { 40.0 } else { 80.0 };
     let name = name_of(server, id);
+    let now = Instant::now();
     let Some(c) = server.clients.get_mut(&id) else { return };
+    // Anti-rebond : une suspicion par fenêtre, quoi qu'il arrive.
+    if c.flag_at.is_some_and(|t| now.duration_since(t) < FLAG_WINDOW) {
+        return;
+    }
+    c.flag_at = Some(now);
     c.strikes += points;
     server.rejections += 1;
     if c.strikes > limit {
@@ -1294,7 +1321,7 @@ fn reset_world(server: &mut ServerState, seed: u64) {
     broadcast(server, None, &Packet::Reset { seed });
     let ids: Vec<u16> = server.clients.keys().copied().collect();
     for id in ids {
-        let pos = crate::player::spawn_point(&server.world, Some(id));
+        let pos = crate::player::random_spawn(&server.world);
         if let Some(c) = server.clients.get_mut(&id) {
             c.pos = pos;
             c.last_valid = pos;
@@ -1313,6 +1340,13 @@ fn reset_world(server: &mut ServerState, seed: u64) {
 fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
     let now_s = time.elapsed_secs();
     let now = Instant::now();
+
+    // Le compteur de suspicion se vide tout seul (1 point/s) : un joueur
+    // signalé puis redevenu normal ne garde pas son marquage.
+    let decay = time.delta_secs();
+    for c in server.clients.values_mut() {
+        c.strikes = (c.strikes - decay).max(0.0);
+    }
 
     // Console du serveur dédié.
     let mut lines = Vec::new();
@@ -1335,7 +1369,7 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
         .map(|(&id, _)| id)
         .collect();
     for id in due {
-        let pos = crate::player::spawn_point(&server.world, Some(id));
+        let pos = crate::player::random_spawn(&server.world);
         let protect = Duration::from_secs_f32(server.config.rules.spawn_protection);
         if let Some(c) = server.clients.get_mut(&id) {
             c.hp = 100.0;
@@ -1618,18 +1652,21 @@ fn crush_and_fall(server: &mut ServerState, now: Instant) {
     if server.sim.blocks.is_empty() && server.sim.bodies.is_empty() {
         return;
     }
-    let victims: Vec<(u16, Vec3)> = server
+    let victims: Vec<(u16, Vec3, Option<u32>)> = server
         .clients
         .iter()
         .filter(|(_, c)| {
             c.joined && c.placed && c.dead_until.is_none() && now.duration_since(c.last_crush) > Duration::from_millis(400)
         })
-        .map(|(&id, c)| (id, c.pos))
+        .map(|(&id, c)| (id, c.pos, c.driving))
         .collect();
-    for (id, pos) in victims {
+    for (id, pos, driving) in victims {
         let lo = pos + Vec3::new(-0.3, 0.0, -0.3);
         let hi = pos + Vec3::new(0.3, 1.7, 0.3);
-        if let Some((mass, speed)) = server.sim.crush_at(lo, hi) {
+        // `driving` est exclu : le conducteur est **dans** son véhicule, il
+        // serait sinon écrasé par sa propre voiture dès la première
+        // accélération.
+        if let Some((mass, speed)) = server.sim.crush_at_except(lo, hi, driving) {
             let amount = (mass * speed * 1.6).min(95.0);
             if amount > 4.0 {
                 if let Some(c) = server.clients.get_mut(&id) {
@@ -1989,18 +2026,32 @@ fn handle_enter(server: &mut ServerState, id: u16, car: u16) {
     }
     let player = c.pos;
     let Some(&min) = server.world.cars.get(car as usize) else { return };
-    let center = server.world.cell_center(min + IVec3::new(2, 3, 5));
-    if center.distance(player + Vec3::Y) > 7.0 {
-        suspect(server, id, 1.0, "véhicule hors de portée");
-        return;
-    }
     let body_id = match server.car_bodies.get(&car).copied() {
-        Some(b) if server.sim.body(b).is_some() => b,
+        Some(b) if server.sim.body(b).is_some() => {
+            // La voiture roule déjà : c'est sa position **actuelle** qui
+            // compte, pas sa case d'origine dans la carte (elle a pu être
+            // garée ailleurs après le premier voyage).
+            let at = server.sim.body(b).map(|body| body.pos).unwrap_or(Vec3::ZERO);
+            if at.distance(player + Vec3::Y) > 7.0 {
+                notice(server, id, "Ce véhicule est trop loin.");
+                return;
+            }
+            b
+        }
         Some(_) => {
+            // Le corps a disparu (voiture tombée hors du monde) : on oublie
+            // cette référence au lieu de condamner définitivement le
+            // emplacement.
+            server.car_bodies.remove(&car);
             notice(server, id, "Ce véhicule est hors d'usage.");
             return;
         }
         None => {
+            let center = server.world.cell_center(min + IVec3::new(2, 3, 5));
+            if center.distance(player + Vec3::Y) > 7.0 {
+                suspect(server, id, 1.0, "véhicule hors de portée");
+                return;
+            }
             let mut cells = Vec::new();
             for x in 0..5 {
                 for y in 0..6 {
@@ -2061,9 +2112,17 @@ fn eject_driver(server: &mut ServerState, id: u16, place: bool) {
         if let Some(b) = server.sim.body(body_id) {
             let fwd = b.rot * Vec3::NEG_Z;
             let side = Vec3::new(-fwd.z, 0.0, fwd.x).normalize_or_zero();
-            for s in [3.0, -3.0, 4.5] {
+            // On cherche le sol **au niveau du véhicule**, jamais plus haut :
+            // c'était ce qui posait le joueur sur le toit de l'immeuble le
+            // plus proche quand il sortait d'une voiture garée à côté.
+            let ceiling = b.pos.y + 1.2;
+            for s in [3.0, -3.0, 4.5, 0.0, -4.5, 6.0] {
                 let p = b.pos + side * s;
-                let ground = server.world.ground_height(p.x, p.z);
+                let ground = server.world.ground_height_below(p.x, p.z, ceiling);
+                // Un sol bien plus bas que la voiture = un trou ou une falaise.
+                if ground < b.pos.y - 6.0 {
+                    continue;
+                }
                 let candidate = Vec3::new(p.x, ground + 0.1, p.z);
                 if !server.world.overlaps(candidate + Vec3::new(-0.3, 0.1, -0.3), candidate + Vec3::new(0.3, 1.7, 0.3)) {
                     target = Some(candidate);
@@ -2071,7 +2130,9 @@ fn eject_driver(server: &mut ServerState, id: u16, place: bool) {
                 }
             }
             if target.is_none() {
-                target = Some(b.pos + Vec3::Y * 3.0);
+                // Dernier recours : à côté du véhicule, un peu plus bas.
+                let p = b.pos - Vec3::Y * 0.8;
+                target = Some(p);
             }
         }
     }
@@ -2083,6 +2144,34 @@ fn eject_driver(server: &mut ServerState, id: u16, place: bool) {
             c.queue(&Packet::Teleport { pos: p }.encode());
         }
         c.queue(&Packet::Driving { body: 0 }.encode());
+    }
+}
+
+/// Un tir a touché un véhicule : on l'écaille, on réveille ce qui traîne
+/// autour et on prévient le tireur si la voiture devient inutilisable.
+fn damage_vehicle(server: &mut ServerState, id: u16, body: u32, point: Vec3, blast: f32, kind: HitKind) {
+    let mut ev = Vec::new();
+    {
+        let s = &mut *server;
+        s.sim.damage_bodies(point, blast.max(0.3), &mut ev);
+        s.sim.wake_near(point, blast.max(0.3), if kind == HitKind::Explosion { 4.0 } else { 0.0 });
+    }
+    // La voiture a pu être totalement détruite : on oublie sa position dans
+    // la table des véhicules plutôt que de la laisser morte à jamais.
+    let gone = server.sim.body(body).is_none();
+    if gone {
+        server.car_bodies.retain(|_, b| *b != body);
+    }
+    if let Some(c) = server.clients.get_mut(&id) {
+        c.inv.reward(6);
+        c.inv_dirty = true;
+    }
+    server.events.append(&mut ev);
+    server.unsupported_for = 3.0;
+    flush_events(server);
+    if gone {
+        // Les personnes à bord sont éjectées par la boucle de conduite.
+        notice(server, id, "Véhicule détruit.");
     }
 }
 
@@ -2253,7 +2342,7 @@ fn handle_join(server: &mut ServerState, id: u16, name: String, token: u64, vers
     let saved = server.players.get(&unique).cloned();
     let rules = server.config.rules.clone();
     let mode = server.config.mode;
-    let spawn = crate::player::spawn_point(&server.world, Some(id));
+    let spawn = crate::player::random_spawn(&server.world);
     if let Some(c) = server.clients.get_mut(&id) {
         c.name = unique.clone();
         c.joined = true;
@@ -2283,10 +2372,14 @@ fn handle_join(server: &mut ServerState, id: u16, name: String, token: u64, vers
         for data in &stream {
             c.queue(data);
         }
-        if saved.is_some() {
-            c.queue(&Packet::Teleport { pos: c.pos }.encode());
-            c.teleporting = Some((c.pos, Instant::now()));
-        }
+        // Le point d'apparition est toujours imposé par le serveur : le
+        // client l'ignore et se téléporte. Sans ce paquet un nouveau joueur
+        // restait sur son spawn local (le carrefour) au lieu d'apparaître
+        // sur le trottoir choisi par le serveur.
+        c.queue(&Packet::Teleport { pos: c.pos }.encode());
+        c.teleporting = Some((c.pos, Instant::now()));
+        c.placed = false;
+        c.rejected = 0;
     }
     let addr = server.clients.get(&id).map(|c| c.addr.to_string()).unwrap_or_default();
     logger::info(format!("{unique} a rejoint la partie (#{id}, {addr})"));
@@ -2383,8 +2476,11 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
     let too_fast = level > 0 && (horizontal > max_h * dt * 1.2 + 0.7 || dy > max_up * dt * 1.2 + 0.7);
     // Traversée de mur : la nouvelle boîte ne doit pas être dans du solide.
     let inside = level > 0 && {
-        let lo = pos + Vec3::new(-0.27, 0.12, -0.27);
-        let hi = pos + Vec3::new(0.27, 1.6, 0.27);
+        // Boîte nettement plus petite que celle du client : la carte du
+        // serveur peut avoir un voxel d'avance ou de retard (explosion,
+        // porte, marche montée), et ça ne doit pas passer pour de la triche.
+        let lo = pos + Vec3::new(-0.18, 0.7, -0.18);
+        let hi = pos + Vec3::new(0.18, 1.4, 0.18);
         server.world.overlaps(lo, hi)
     };
     let Some(c) = server.clients.get_mut(&id) else { return };
@@ -2397,7 +2493,12 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
             c.teleporting = Some((back, now));
             c.queue(&Packet::Teleport { pos: back }.encode());
         }
-        suspect(server, id, if inside { 0.8 } else { 1.0 }, if inside { "traverse les murs" } else { "déplacement trop rapide" });
+        // On ne note une suspicion qu'au bout de `STRIKE_AFTER` refus
+        // consécutifs : un état isolé qui dépasse le seuil (à-coup réseau,
+        // gravat qui pousse le joueur) ne doit plus être facturé.
+        if rejected == STRIKE_AFTER || rejected % 20 == 0 {
+            suspect(server, id, if inside { 2.0 } else { 3.0 }, if inside { "traverse les murs" } else { "déplacement trop rapide" });
+        }
         return;
     }
     c.rejected = 0;
@@ -2406,6 +2507,9 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
     c.fall_speed = if vy < -2.0 { c.fall_speed.min(vy) } else { c.fall_speed };
     let world = &server.world;
     let on_ground = standing(world, pos);
+    // Debout sur un véhicule ou des gravats (absents de la grille) : pas du
+    // vol. On ne soupçonne qu'un joueur nettement au-dessus du sol.
+    let high = pos.y - world.ground_height_below(pos.x, pos.z, pos.y + 0.1) > 3.0;
     let c = server.clients.get_mut(&id).unwrap();
     c.pos = pos;
     c.last_state = now;
@@ -2418,17 +2522,18 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
         c.airborne_since = None;
         c.last_valid = pos;
     } else if vy > -1.0 {
-        // En l'air sans tomber : saut (court) ou vol.
+        // En l'air sans tomber : saut (court) ou vol. On laisse une marge
+        // large : rester sur un gravat, un véhicule ou une porte qui se
+        // referme passe ici aussi, sans être de la triche.
         let since = *c.airborne_since.get_or_insert(now);
-        if !fly_ok && level > 0 && since.elapsed() > Duration::from_millis(2200) && now >= c.grace_until {
+        if !fly_ok && level > 0 && high && since.elapsed() > Duration::from_secs(6) && now >= c.grace_until {
             c.airborne_since = Some(now);
-            suspect(server, id, 6.0, "vol");
+            suspect(server, id, 4.0, "vol");
             return;
         }
     } else {
         c.airborne_since = None;
     }
-    c.strikes = (c.strikes - dt * 1.5).max(0.0);
     if fall_damage > 0.0 && server.config.rules.fall_damage && !sandbox {
         hurt(server, id, None, fall_damage, pos, Vec3::ZERO, "chute");
     } else if fall_damage > 0.0 && server.config.rules.fall_damage {
@@ -2558,7 +2663,17 @@ fn handle_hit(server: &mut ServerState, id: u16, kind: HitKind, origin: Vec3, di
         }
         let reach = max_reach(kind).min(spec.reach.max(1.0) + 1.0);
         let world_hit = server.world.raycast(origin, dir, reach);
-        let limit = world_hit.as_ref().map_or(reach, |h| h.point.distance(origin));
+        // Les véhicules sont des corps rigides, invisibles pour la grille du
+        // monde : sans ce second lancer de rayon, on ne pouvait pas les
+        // détruire une fois qu'on y était monté.
+        let car_hit = server.sim.raycast(origin, dir, reach);
+        // Le plus proche des deux touche.
+        let limit = match (world_hit.as_ref(), car_hit.as_ref()) {
+            (Some(w), Some(c)) => w.point.distance(origin).min(c.0.distance(origin)),
+            (Some(w), None) => w.point.distance(origin),
+            (None, Some(c)) => c.0.distance(origin),
+            (None, None) => reach,
+        };
         // Un joueur sur la trajectoire est blessé.
         let dmg = spec.damage;
         if dmg > 0.0 {
@@ -2587,12 +2702,44 @@ fn handle_hit(server: &mut ServerState, id: u16, kind: HitKind, origin: Vec3, di
                 }
                 hit.point
             }
-            None => return,
+            None => match car_hit {
+                // Impact sur un véhicule : on l'écaille directement.
+                Some((point, body)) => {
+                    if spec.extinguish {
+                        douse_around(server, point, 2.6);
+                        return;
+                    }
+                    if spec.incendiary > 0.0 {
+                        ignite_around(server, point, spec.incendiary * 0.45);
+                    }
+                    damage_vehicle(server, id, body, point, blast, kind);
+                    return;
+                }
+                None => return,
+            },
         }
     };
 
     // Destruction, effondrement, gravats, argent.
     let mut destroyed = server.world.carve(center, blast);
+    // Les explosions et les gros rayons touchent aussi les véhicules.
+    if blast >= 0.4 {
+        let mut ev = Vec::new();
+        let hit = {
+            let s = &mut *server;
+            s.sim.damage_bodies(center, blast, &mut ev)
+        };
+        if hit > 0 {
+            let value: u32 = (blast as u32).saturating_mul(4);
+            if let Some(c) = server.clients.get_mut(&id) {
+                c.inv.reward(value);
+                c.inv_dirty = true;
+            }
+            server.events.append(&mut ev);
+            server.unsupported_for = 3.0;
+            flush_events(server);
+        }
+    }
     if !destroyed.is_empty() {
         let value: u32 = destroyed
             .iter()

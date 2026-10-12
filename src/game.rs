@@ -684,7 +684,9 @@ pub struct Settings {
     pub sfx: f32,
     /// Préréglage graphique : 0 Bas, 1 Moyen, 2 Élevé, 3 Ultra, 4 Perso.
     pub quality: u8,
-    /// Anticrénelage : 0 aucun, 2 ou 4 échantillons.
+    /// Anticrénelage : 0 aucun, 4 échantillons. Le format 2× est.proposé par
+    /// aucun matériel current et casse WebGPU sur les pilotes logiciels
+    /// (llvmpipe), on ne le propose donc plus.
     pub msaa: u8,
     /// Halo lumineux.
     pub bloom: bool,
@@ -696,6 +698,10 @@ pub struct Settings {
     pub voice_mode: u8,
     /// Volume des voix des autres joueurs.
     pub voice_volume: f32,
+    /// Côté du joystick tactile : 0 à gauche, 1 à droite.
+    pub joystick_side: u8,
+    /// Sensibilité du regard au doigt (radian par pixel d'écran).
+    pub touch_sensitivity: f32,
 }
 
 /// Noms des préréglages graphiques.
@@ -706,7 +712,7 @@ impl Settings {
     pub fn apply_quality(&mut self, q: u8) {
         let (view, shadows, msaa, bloom, particles) = match q {
             0 => (150.0, 0, 0, false, 1),
-            1 => (250.0, 1, 2, false, 1),
+            1 => (250.0, 1, 4, false, 1),
             2 => (400.0, 2, 4, true, 2),
             _ => (600.0, 2, 4, true, 2),
         };
@@ -737,12 +743,14 @@ impl Default for Settings {
             head_bob: true,
             sfx: 1.0,
             quality: 1,
-            msaa: 2,
+            msaa: 4,
             bloom: false,
             particles: 1,
             music: 0.4,
             voice_mode: 1,
             voice_volume: 0.8,
+            joystick_side: 0,
+            touch_sensitivity: 0.005,
         }
     }
 }
@@ -772,9 +780,14 @@ impl Settings {
         self.music = self.music.clamp(0.0, 1.0);
         self.voice_mode = self.voice_mode.min(2);
         self.voice_volume = self.voice_volume.clamp(0.0, 1.0);
+        self.joystick_side = self.joystick_side.min(1);
+        self.touch_sensitivity = self.touch_sensitivity.clamp(0.001, 0.02);
         self.quality = self.quality.min(4);
         self.particles = self.particles.min(2);
-        if !matches!(self.msaa, 0 | 2 | 4) {
+        // Un ancien réglage « 2× » est ramené à 4× : les pilotes
+        // logiciels (llvmpipe/Mesa) ne gèrent que 1 et 4 échantillons et
+        // plantent la fenêtre avec une erreur de validation WebGPU.
+        if !matches!(self.msaa, 0 | 4) {
             self.msaa = 4;
         }
         self.name = self.name.chars().filter(|c| !c.is_control()).take(16).collect();
@@ -788,6 +801,12 @@ impl Settings {
 pub fn config_dir() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
     let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    // Android : dossier privé de l'application (pas de HOME).
+    #[cfg(target_os = "android")]
+    {
+        return bevy::android::ANDROID_APP.get().and_then(|app| app.internal_data_path());
+    }
+    #[allow(unreachable_code)]
     if cfg!(target_os = "windows") {
         env("APPDATA").map(|p| p.join("BoomGround"))
     } else if cfg!(target_os = "macos") {
@@ -825,6 +844,8 @@ particles={}
 music={}
 voice_mode={}
 voice_volume={}
+joystick_side={}
+touch_sensitivity={}
 ",
         s.name,
         s.sensitivity,
@@ -846,7 +867,9 @@ voice_volume={}
         s.particles,
         s.music,
         s.voice_mode,
-        s.voice_volume
+        s.voice_volume,
+        s.joystick_side,
+        s.touch_sensitivity
     );
     let _ = std::fs::write(dir.join("settings.txt"), body);
 }
@@ -885,6 +908,8 @@ pub fn load_settings() -> Settings {
             "music" => s.music = v.parse().unwrap_or(s.music),
             "voice_mode" => s.voice_mode = v.parse().unwrap_or(s.voice_mode),
             "voice_volume" => s.voice_volume = v.parse().unwrap_or(s.voice_volume),
+            "joystick_side" => s.joystick_side = v.parse().unwrap_or(s.joystick_side),
+            "touch_sensitivity" => s.touch_sensitivity = v.parse().unwrap_or(s.touch_sensitivity),
             _ => {}
         }
     }

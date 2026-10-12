@@ -1246,9 +1246,157 @@ impl Sim {
     // Dégâts aux joueurs
     // ------------------------------------------------------------------
 
+    /// Éclats : transforme les voxels arrachés d'un corps en gravats.
+    fn chips_to_rubble(&mut self, chips: &[(Vec3, u8)], vel: Vec3, ang: Vec3, origin: Vec3, point: Vec3, ev: &mut Vec<SimEvent>) {
+        use std::collections::HashMap;
+        let mut zones: HashMap<IVec3, (Vec3, u32, u8)> = HashMap::new();
+        for (wp, m) in chips {
+            let key = (*wp / (VOXEL * ZONE as f32)).floor().as_ivec3();
+            let e = zones.entry(key).or_insert((Vec3::ZERO, 0, *m));
+            e.0 += *wp;
+            e.1 += 1;
+        }
+        let mut count = 0;
+        let mut new_ids = Vec::new();
+        for (_, (sum, n, m)) in zones {
+            if m == mat::GLASS || count >= MAX_PER_HIT {
+                continue;
+            }
+            count += 1;
+            let c = sum / n as f32;
+            let half = Vec3::splat(VOXEL * ZONE as f32 * 0.45);
+            let vp = vel + ang.cross(c - origin);
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1).max(1);
+            let jitter = Vec3::new(self.rng.signed(), self.rng.f32() * 0.6, self.rng.signed()) * 2.0;
+            self.blocks.push(Block {
+                id,
+                pos: c,
+                yaw: 0.0,
+                vel: vp * 0.5 + (c - point).normalize_or_zero() * 2.0 + jitter,
+                spin: self.rng.signed() * 4.0,
+                half,
+                mat: m,
+                mass: half.x * half.y * half.z * 8.0 * density(m),
+                sleeping: false,
+                rest: 0.0,
+            });
+            new_ids.push(id);
+        }
+        if !new_ids.is_empty() {
+            ev.push(SimEvent::BlocksAdded(new_ids));
+        }
+    }
+
+    /// Premier corps solide traversé par un rayon.
+    ///
+    /// Le rayon de visée des armes ne regarde que la grille du monde : sans
+    /// ceci, les véhicules (devenus des corps rigides) étaient
+    /// **intouchables**, on pouvait les canonner sans rien abîmer.
+    /// Renvoie (point d'impact, identifiant du corps).
+    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<(Vec3, u32)> {
+        let dir = dir.normalize_or_zero();
+        if dir == Vec3::ZERO {
+            return None;
+        }
+        let mut best: Option<(Vec3, u32)> = None;
+        // On ne s'intéresse qu'aux véhicules : les autres corps se font
+        // sculpter par le monde et leurs gravats font le reste.
+        for body in &self.bodies {
+            if body.vehicle.is_none() {
+                continue;
+            }
+            let half = body.grid.dims.as_vec3() * VOXEL * 0.5;
+            let reach = half.length() + 1.0;
+            if (body.pos - origin).length() > reach + max_dist {
+                continue;
+            }
+            // Pas de VOXEL/2 : on ne rate pas un voxel sur deux.
+            let step = VOXEL * 0.5;
+            let steps = ((max_dist / step) as usize).min(4096);
+            for i in 0..=steps {
+                let p = origin + dir * (i as f32 * step);
+                if body.contains(p) {
+                    let d = p.distance(origin);
+                    if best.is_none_or(|(bp, _)| d < bp.distance(origin)) {
+                        best = Some((p, body.id));
+                    }
+                    break;
+                }
+            }
+        }
+        best
+    }
+
+    /// Écarte les voxels d'une sphère de tous les corps rigides touchés.
+    ///
+    /// C'est ce qui rend les **véhicules destructibles** : une fois
+    /// transformée en corps rigide, la voiture n'appartient plus à la grille
+    /// du monde, donc ni `carve` ni le rayon de visée des armes ne la
+    /// touchaient — on pouvait la canonner sans lui faire le moindre dégât.
+    /// Renvoie le nombre de corps altérés.
+    pub fn damage_bodies(&mut self, point: Vec3, radius: f32, ev: &mut Vec<SimEvent>) -> usize {
+        let mut hit_any = 0usize;
+        for bi in 0..self.bodies.len() {
+            // La sphère d'éclats ne touche pas le volume englobant du corps.
+            let Some(body) = self.bodies.get(bi) else { continue };
+            let half = body.grid.dims.as_vec3() * VOXEL * 0.5;
+            if (body.pos - point).length() > radius + half.length() {
+                continue;
+            }
+            let mut chips: Vec<(Vec3, u8)> = Vec::new();
+            let d = body.grid.dims;
+            let center_local = body.rot.inverse() * (point - body.pos) + body.com;
+            let r_cells = (radius / VOXEL).ceil() as i32 + 1;
+            let cc = (center_local / VOXEL).floor().as_ivec3();
+            for x in (cc.x - r_cells).max(0)..(cc.x + r_cells + 1).min(d.x) {
+                for y in (cc.y - r_cells).max(0)..(cc.y + r_cells + 1).min(d.y) {
+                    for z in (cc.z - r_cells).max(0)..(cc.z + r_cells + 1).min(d.z) {
+                        let c = IVec3::new(x, y, z);
+                        let Some(body) = self.bodies.get_mut(bi) else { break };
+                        if !body.grid.is_solid(c) {
+                            continue;
+                        }
+                        let lp = (c.as_vec3() + Vec3::splat(0.5)) * VOXEL;
+                        if lp.distance(center_local) <= radius {
+                            chips.push((body.cell_world(c), body.grid.material(c)));
+                            body.grid.set(c, None);
+                        }
+                    }
+                }
+            }
+            if chips.is_empty() {
+                continue;
+            }
+            hit_any += 1;
+            let (vel, ang, pos) = {
+                let body = &mut self.bodies[bi];
+                body.lin *= 0.9;
+                (body.lin, body.ang, body.pos)
+            };
+            self.chips_to_rubble(&chips, vel, ang, pos, point, ev);
+            let Some(body) = self.bodies.get_mut(bi) else { continue };
+            if body.grid.count() == 0 || !body.recompute() {
+                ev.push(SimEvent::BodyRemoved(body.id));
+                self.bodies.remove(bi);
+            } else {
+                ev.push(SimEvent::BodyChanged(body.id));
+            }
+        }
+        hit_any
+    }
+
     /// Vitesse d'un corps ou d'un bloc lourd qui touche la boîte `[lo, hi]`.
     /// Renvoie (masse, vitesse verticale/horizontale) du pire objet.
     pub fn crush_at(&self, lo: Vec3, hi: Vec3) -> Option<(f32, f32)> {
+        self.crush_at_except(lo, hi, None)
+    }
+    /// Comme [`Self::crush_at`], mais en ignorant le corps `except`.
+    ///
+    /// Indispensable pour le conducteur : sa position **est** celle de son
+    /// véhicule, donc sans cette exclusion il se faisait écraser par sa
+    /// propre voiture (36 à 84 dégâts dès 1,5 m/s, donc mort en un tour).
+    pub fn crush_at_except(&self, lo: Vec3, hi: Vec3, except: Option<u32>) -> Option<(f32, f32)> {
         let mut best: Option<(f32, f32)> = None;
         for b in &self.blocks {
             if b.sleeping || b.mass < 0.7 || b.vel.length() < 4.0 {
@@ -1264,6 +1412,9 @@ impl Sim {
         }
         let center = (lo + hi) * 0.5;
         for body in &self.bodies {
+            if Some(body.id) == except {
+                continue;
+            }
             let speed = body.velocity_at(center).length();
             if speed < 1.5 {
                 continue;

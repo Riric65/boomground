@@ -9,22 +9,77 @@
 use bevy::prelude::*;
 
 use crate::world::mat::*;
-use crate::world::VoxelWorld;
+use crate::world::{VoxelWorld, VOXEL};
 
 /// Version du générateur : une sauvegarde d'une autre version est refusée
 /// (rejouer son historique sur une autre ville n'aurait aucun sens).
 pub const MAP_VERSION: u32 = 3;
 
 /// Espacement des rues, en cellules.
-const BLOCK: i32 = 64;
+pub const BLOCK: i32 = 64;
 /// Demi-largeur de la chaussée.
-const ROAD: i32 = 6;
+pub const ROAD: i32 = 6;
 /// Largeur des trottoirs.
-const WALK: i32 = 3;
+pub const WALK: i32 = 3;
 /// Dessus du sol (première cellule vide).
 pub const GROUND: i32 = 6;
 /// Épaisseur des murs, en voxels.
 const WALL: i32 = 2;
+
+/// Une position de trottoir tirée au sort sur toute la carte.
+///
+/// Le serveur s'en sert pour faire apparaître les joueurs **côté serveur**
+/// : n'importe quel point de trottoir libre de la ville, et non un point
+/// fixe autour du carrefour central. Renvoie `None` si la carte est trop
+/// petite ou entièrement bâtie.
+pub fn random_sidewalk(world: &VoxelWorld, salt: u64) -> Option<Vec3> {
+    if world.dims.x < BLOCK * 2 || world.dims.z < BLOCK * 2 {
+        return None;
+    }
+    let lines = (world.dims.x / BLOCK).max(1);
+    // Le bord intérieur du trottoir : `c ± (ROAD + 1)` (voir `street_props`).
+    let edge = ROAD + 1;
+    let mut rng = MapRng::new(world.seed ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    // Quarantaine d'essais : on veut un trottoir libre, pas un toit ni un
+    // carrefour.
+    for _ in 0..48 {
+        let k = rng.range(0, lines);
+        let along = rng.range(6, world.dims.z.saturating_sub(6));
+        let side = if rng.chance(0.5) { -1 } else { 1 };
+        let across = k * BLOCK + side * edge;
+        // Les deux sens de rue : décalage en X (rue le long de Z) puis en Z.
+        for cell in [
+            IVec3::new(across, GROUND, along),
+            IVec3::new(along, GROUND, across),
+        ] {
+            if cell.x <= 2 || cell.x >= world.dims.x - 2 || cell.z <= 2 || cell.z >= world.dims.z - 2 {
+                continue;
+            }
+            // Le trottoir est surélevé d'un voxel : on veut son dessus, donc
+            // la cellule de surface doit être du béton (les carrefours, eux,
+            // sont à l'asphalte au niveau du sol).
+            if !in_bounds(world, cell) || world.material(cell) != CONCRETE {
+                continue;
+            }
+            let feet = world.cell_min(cell + IVec3::Y) + Vec3::new(VOXEL * 0.5, 0.06, VOXEL * 0.5);
+            // Place libre pour toute la hauteur du joueur ? La boîte va des
+            // pieds au sommet de la tête : ne pas redescendre sous `feet`,
+            // sinon elle inclut le trottoir et tout candidat est refusé.
+            let half = Vec3::new(0.3, crate::player::HEIGHT * 0.5, 0.3);
+            let center = feet + Vec3::Y * half.y;
+            if world.overlaps(center - half, center + half) {
+                continue;
+            }
+            return Some(feet);
+        }
+    }
+    None
+}
+
+/// La cellule est-elle dans la grille ?
+fn in_bounds(world: &VoxelWorld, c: IVec3) -> bool {
+    c.cmpge(IVec3::ZERO).all() && c.cmplt(world.dims).all()
+}
 
 /// Générateur pseudo-aléatoire déterministe (splitmix64).
 pub struct MapRng(u64);
@@ -903,4 +958,57 @@ fn car(w: &mut VoxelWorld, rng: &mut MapRng, at: IVec3) {
     w.fill(at + IVec3::new(0, 3, 3), at + IVec3::new(5, 5, 8), GLASS);
     w.fill(at + IVec3::new(1, 3, 4), at + IVec3::new(4, 5, 7), color);
     w.fill(at + IVec3::new(0, 5, 3), at + IVec3::new(5, 6, 8), color);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Le spawn serveur doit tomber **sur un trottoir**, en lieu de points
+    /// libres : c'est ce qui manquait avant (tout le monde réapparaissait au
+    /// carrefour central).
+    #[test]
+    fn random_sidewalk_lands_on_a_sidewalk_and_is_free() {
+        let mut w = VoxelWorld::with_blocks(4);
+        w.rebuild(1234);
+        for salt in 0..8u64 {
+            let Some(p) = random_sidewalk(&w, salt) else {
+                continue;
+            };
+            // Bien dans la carte, et posé sur du béton au niveau du trottoir.
+            assert!(w.in_bounds_xz(p), "hors carte : {p:?}");
+            let below = w.world_to_cell(Vec3::new(p.x, p.y - VOXEL * 0.5, p.z));
+            assert_eq!(w.material(below), CONCRETE, "pas sur un trottoir : {p:?}");
+            assert!(below.y == GROUND, "pas à hauteur de trottoir : {p:?}");
+            // De la place pour un joueur debout, des pieds à la tête.
+            let half = Vec3::new(0.3, crate::player::HEIGHT * 0.5, 0.3);
+            let center = Vec3::new(p.x, p.y + half.y, p.z);
+            assert!(!w.overlaps(center - half, center + half), "joueur coincé : {p:?}");
+        }
+    }
+
+    /// Deux joueurs ne doivent pas réapparaître au même endroit.
+    #[test]
+    fn different_players_get_different_sidewalks() {
+        let mut w = VoxelWorld::with_blocks(4);
+        w.rebuild(1234);
+        let spots: Vec<Vec3> = (0..8u64).filter_map(|s| random_sidewalk(&w, s)).collect();
+        assert!(spots.len() >= 2, "pas assez de trottoirs trouvés : {}", spots.len());
+        for (i, a) in spots.iter().enumerate() {
+            for b in &spots[i + 1..] {
+                assert!(a.distance(*b) > 1.0, "deux joueurs au même point : {a:?}");
+            }
+        }
+    }
+
+    /// Le même joueur, la même ville : toujours le même trottoir (les
+    /// sauvegardes et les réapparitions doivent être stables).
+    #[test]
+    fn sidewalk_is_stable_for_a_given_seed() {
+        let mut w = VoxelWorld::with_blocks(4);
+        w.rebuild(99);
+        let a = random_sidewalk(&w, 3);
+        let b = random_sidewalk(&w, 3);
+        assert_eq!(a, b);
+    }
 }
