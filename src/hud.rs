@@ -329,6 +329,8 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 position_type: PositionType::Absolute,
                 bottom: px(96),
                 width: Val::Percent(100.0),
+                // Sur mobile, les commandes tactiles remplacent ces barres.
+                display: if crate::touch::is_touch_platform() { Display::None } else { Display::Flex },
                 justify_content: JustifyContent::Center,
                 column_gap: px(6.0),
                 ..default()
@@ -357,6 +359,8 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 position_type: PositionType::Absolute,
                 bottom: px(18),
                 width: Val::Percent(100.0),
+                // Sur mobile, les commandes tactiles remplacent ces barres.
+                display: if crate::touch::is_touch_platform() { Display::None } else { Display::Flex },
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::FlexEnd,
                 column_gap: px(4.0),

@@ -294,7 +294,12 @@ fn window_icon(mut done: Local<bool>, mut tries: Local<u32>) {
 /// 4K), la mise en page de référence étant 1440×810.
 fn ui_scale(window: Query<&Window, With<bevy::window::PrimaryWindow>>, mut scale: ResMut<bevy::ui::UiScale>) {
     let Ok(w) = window.single() else { return };
-    let s = (w.width() / 1440.0).min(w.height() / 810.0).clamp(0.55, 2.4);
+    // Téléphone en portrait : on se cale sur la largeur.
+    let s = if touch::is_touch_platform() {
+        (w.width() / 480.0).clamp(0.5, 2.0)
+    } else {
+        (w.width() / 1440.0).min(w.height() / 810.0).clamp(0.55, 2.4)
+    };
     if (scale.0 - s).abs() > 0.01 {
         scale.0 = s;
     }

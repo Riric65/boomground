@@ -727,6 +727,17 @@ impl Settings {
 
 impl Default for Settings {
     fn default() -> Self {
+        let mut s = Self::base();
+        // Téléphone : préréglage « Bas » (mémoire et GPU limités).
+        if crate::touch::is_touch_platform() {
+            s.apply_quality(0);
+        }
+        s
+    }
+}
+
+impl Settings {
+    fn base() -> Self {
         Self {
             name: default_name(),
             sensitivity: 0.0022,

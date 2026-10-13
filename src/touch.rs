@@ -196,10 +196,9 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 Node {
                     position_type: PositionType::Absolute,
                     right: px(24.0),
-                    bottom: px(150.0),
-                    width: px(300.0),
-                    height: px(190.0),
-                    justify_content: JustifyContent::SpaceBetween,
+                    bottom: px(200.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(12.0),
                     align_items: AlignItems::FlexEnd,
                     ..default()
                 },
