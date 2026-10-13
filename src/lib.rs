@@ -7,6 +7,7 @@
 
 pub mod chat;
 pub mod clipboard;
+pub mod crashlog;
 pub mod debris;
 pub mod debug;
 pub mod fx;
@@ -44,6 +45,7 @@ use world::VoxelWorld;
 
 /// Lance le client (fenêtre, rendu, jeu).
 pub fn run() {
+    crashlog::install_panic_hook();
     App::new()
         .insert_resource(bevy::audio::DefaultSpatialScale(bevy::audio::SpatialScale::new(0.03)))
         .insert_resource(ClearColor(Color::srgb(0.55, 0.70, 0.90)))
@@ -75,13 +77,7 @@ pub fn run() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: format!("BoomGround {}", install::VERSION),
-                // Sur mobile on démarre en portrait : le jeu se tient d'une
-                // seule main, joystick à gauche, boutons à droite.
-                resolution: if touch::is_touch_platform() {
-                    WindowResolution::new(540, 960)
-                } else {
-                    WindowResolution::new(1440, 810)
-                },
+                resolution: WindowResolution::new(1440, 810),
                 present_mode: PresentMode::AutoVsync,
                 // Les tests automatiques ne volent pas le clavier.
                 focused: !debug::enabled(),
@@ -97,6 +93,8 @@ pub fn run() {
             }),
             ..default()
         }))
+        // Erreurs GPU : journalisées, et non fatales sur téléphone.
+        .insert_resource(bevy::render::error_handler::RenderErrorHandler(crashlog::on_render_error))
         .add_systems(
             Startup,
             (
@@ -225,6 +223,7 @@ pub fn run() {
                 ui_scale,
             ),
         )
+        .add_systems(PostStartup, crashlog::show_last)
         .add_systems(Update, chat::update.after(ui::text_fields))
         .add_systems(Last, (perf::detect_refresh, perf::limit).chain())
         .run();
@@ -294,12 +293,9 @@ fn window_icon(mut done: Local<bool>, mut tries: Local<u32>) {
 /// 4K), la mise en page de référence étant 1440×810.
 fn ui_scale(window: Query<&Window, With<bevy::window::PrimaryWindow>>, mut scale: ResMut<bevy::ui::UiScale>) {
     let Ok(w) = window.single() else { return };
-    // Téléphone en portrait : on se cale sur la largeur.
-    let s = if touch::is_touch_platform() {
-        (w.width() / 480.0).clamp(0.5, 2.0)
-    } else {
-        (w.width() / 1440.0).min(w.height() / 810.0).clamp(0.55, 2.4)
-    };
+    // Téléphone en paysage : écran plus petit, on descend plus bas.
+    let min = if touch::is_touch_platform() { 0.4 } else { 0.55 };
+    let s = (w.width() / 1440.0).min(w.height() / 810.0).clamp(min, 2.4);
     if (scale.0 - s).abs() > 0.01 {
         scale.0 = s;
     }

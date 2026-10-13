@@ -14,7 +14,7 @@ import android.view.WindowManager;
  * On ajoute seulement :
  *
  * - le mode immersif, pour que le jeu occupe tout l'écran (le jeu se joue
- *   en portrait, cf. {@code android:screenOrientation} dans le manifeste) ;
+ *   en paysage, cf. {@code android:screenOrientation} dans le manifeste) ;
  * - le maintien de l'écran allumé pendant une partie.
  */
 public class MainActivity extends android.app.NativeActivity {

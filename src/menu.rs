@@ -367,7 +367,6 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
     // ------------------------------------------------------------------
     // Menu principal
     // ------------------------------------------------------------------
-    let touch = crate::touch::is_touch_platform();
     commands
         .spawn((
             MenuRoot,
@@ -375,8 +374,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                 position_type: PositionType::Absolute,
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
-                // Portrait sur téléphone : navigation en haut, contenu dessous.
-                flex_direction: if touch { FlexDirection::Column } else { FlexDirection::Row },
+                flex_direction: FlexDirection::Row,
                 ..default()
             },
             overlay_gradient(),
@@ -387,14 +385,10 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
             root.spawn(Node {
                 // Assez large pour que le logo tienne dans la colonne :
                 // il chevauchait sinon le titre du panneau de droite.
-                width: if touch { Val::Percent(100.0) } else { px(400.0) },
-                height: if touch { Val::Auto } else { Val::Percent(100.0) },
+                width: px(400.0),
+                height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
-                padding: if touch {
-                    UiRect::new(px(24.0), px(24.0), px(32.0), px(8.0))
-                } else {
-                    UiRect::new(px(40.0), px(30.0), px(56.0), px(32.0))
-                },
+                padding: UiRect::new(px(40.0), px(30.0), px(56.0), px(32.0)),
                 row_gap: px(8.0),
                 overflow: Overflow::clip(),
                 flex_shrink: 0.0,
@@ -475,15 +469,10 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
             // --- Contenu ---
             root.spawn(Node {
                 flex_grow: 1.0,
-                height: if touch { Val::Auto } else { Val::Percent(100.0) },
+                height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
-                justify_content: if touch { JustifyContent::FlexStart } else { JustifyContent::Center },
-                padding: if touch {
-                    UiRect::all(px(16.0))
-                } else {
-                    UiRect::new(px(30.0), px(48.0), px(40.0), px(40.0))
-                },
-                overflow: if touch { Overflow::scroll_y() } else { Overflow::visible() },
+                justify_content: JustifyContent::Center,
+                padding: UiRect::new(px(30.0), px(48.0), px(40.0), px(40.0)),
                 ..default()
             })
             .with_children(|content| {
