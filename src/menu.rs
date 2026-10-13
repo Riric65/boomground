@@ -1443,6 +1443,7 @@ pub fn flow(
     shop: Res<crate::shop::ShopState>,
     fields: Query<&TextField>,
     mut cursor: Single<&mut CursorOptions>,
+    touch: Res<crate::touch::TouchState>,
 ) {
     if let Some(reason) = net.lost.take() {
         let was_in_game = game.phase == Phase::Playing;
@@ -1462,7 +1463,11 @@ pub fn flow(
         toasts.push("La partie commence !");
     }
 
-    let escape = keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::F1);
+    // Téléphone : bouton pause à l'écran, ou touche Retour d'Android.
+    let escape = keys.just_pressed(KeyCode::Escape)
+        || keys.just_pressed(KeyCode::F1)
+        || keys.just_pressed(KeyCode::BrowserBack)
+        || touch.pause;
     if escape && !ui::typing(&fields) && !game.typing && !chat.closed_now {
         match game.phase {
             Phase::Playing if !shop.open => game.phase = Phase::Menu,

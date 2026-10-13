@@ -43,6 +43,10 @@ pub enum Action {
     Interact,
     /// Action secondaire (clic droit) : faire sauter la C4, changer de matériau.
     Alt,
+    /// Ouvre le chat.
+    Chat,
+    /// Menu pause (comme Échap).
+    Pause,
     /// Arme précédente / suivante dans la barre.
     PrevWeapon,
     NextWeapon,
@@ -64,6 +68,8 @@ pub struct TouchState {
     pub reload: bool,
     pub interact: bool,
     pub alt: bool,
+    pub chat: bool,
+    pub pause: bool,
     pub cycle: i8,
     pub category: Option<usize>,
 }
@@ -152,7 +158,15 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
         ))
         .with_children(|root| {
             // --- Joystick : zone de gauche ou de droite ---
-            root.spawn((MoveZone, zone(45.0)));
+            // Joystick : seulement le bas de l'écran, du côté choisi (le
+            // haut reste au regard et aux boutons).
+            root.spawn((MoveZone, zone(45.0))).insert(Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(45.0),
+                height: Val::Percent(60.0),
+                bottom: px(0.0),
+                ..default()
+            });
             // --- Regard : tout le reste de l'écran ---
             root.spawn((LookZone, zone(55.0)));
 
@@ -246,6 +260,24 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                     ))
                     .with_child(ui::label(&font, "TIR", 22.0, ui::TEXT));
                 });
+            });
+
+            // --- Pause et chat, en haut à droite ---
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: px(12.0),
+                    right: px(110.0),
+                    column_gap: px(10.0),
+                    ..default()
+                },
+                Pickable::IGNORE,
+            ))
+            .with_children(|row| {
+                row.spawn(round_button(54.0, Action::Chat))
+                    .with_child(ui::label(&font, "CHAT", 14.0, ui::TEXT));
+                row.spawn(round_button(54.0, Action::Pause))
+                    .with_child(ui::label(&font, "II", 20.0, ui::TEXT));
             });
 
             // --- Catégories d'armes, en haut de l'écran (vertical) ---
@@ -384,6 +416,8 @@ pub fn pointer(
                 Action::Reload => state.reload = true,
                 Action::Interact => state.interact = true,
                 Action::Alt => state.alt = true,
+                Action::Chat => state.chat = true,
+                Action::Pause => state.pause = true,
                 Action::PrevWeapon => state.cycle = -1,
                 Action::NextWeapon => state.cycle = 1,
                 Action::Category(i) => state.category = Some(i),
@@ -482,6 +516,8 @@ pub fn clear(mut state: ResMut<TouchState>) {
     state.reload = false;
     state.interact = false;
     state.alt = false;
+    state.chat = false;
+    state.pause = false;
     state.cycle = 0;
     state.category = None;
     state.look = Vec2::ZERO;

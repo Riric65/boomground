@@ -874,37 +874,68 @@ impl<'a> Cursor<'a> {
 }
 
 /// Analyse un flux TCP : rend les trames complètes vues jusqu'ici.
+///
+/// Les trames sont lues à partir d'un curseur : le tampon n'est compacté
+/// qu'une fois par appel (avant, chaque trame recopiait tout le reste).
 #[derive(Default)]
 pub struct FrameReader {
     buffer: Vec<u8>,
+    start: usize,
 }
+
+/// Données en attente au-delà desquelles une connexion est coupée : un
+/// client honnête n'en approche jamais.
+pub const MAX_PENDING: usize = 4 << 20;
 
 impl FrameReader {
     pub fn push(&mut self, data: &[u8]) {
         self.buffer.extend_from_slice(data);
     }
 
+    /// Octets reçus mais pas encore découpés en trames.
+    pub fn pending(&self) -> usize {
+        self.buffer.len() - self.start
+    }
+
     /// Vide le tampon et renvoie toutes les trames complètes.
     pub fn drain(&mut self) -> Vec<Vec<u8>> {
+        self.drain_max(usize::MAX)
+    }
+
+    /// Comme [`drain`](Self::drain), au plus `max` trames (le reste attend
+    /// le prochain appel).
+    pub fn drain_max(&mut self, max: usize) -> Vec<Vec<u8>> {
         let mut frames = Vec::new();
-        while let Some(frame) = self.next() {
-            frames.push(frame);
+        while frames.len() < max {
+            match self.next_frame() {
+                Some(f) => frames.push(f),
+                None => break,
+            }
+        }
+        if self.start > 0 {
+            self.buffer.drain(..self.start);
+            self.start = 0;
         }
         frames
     }
 
+    fn next_frame(&mut self) -> Option<Vec<u8>> {
+        let rest = &self.buffer[self.start..];
+        if rest.len() < 2 {
+            return None;
+        }
+        let len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+        if rest.len() < 2 + len {
+            return None;
+        }
+        let frame = rest[2..2 + len].to_vec();
+        self.start += 2 + len;
+        Some(frame)
+    }
+
     /// Retire et renvoie la prochaine trame complète.
     pub fn next(&mut self) -> Option<Vec<u8>> {
-        if self.buffer.len() < 2 {
-            return None;
-        }
-        let len = u16::from_le_bytes([self.buffer[0], self.buffer[1]]) as usize;
-        if self.buffer.len() < 2 + len {
-            return None;
-        }
-        let frame = self.buffer[2..2 + len].to_vec();
-        self.buffer.drain(..2 + len);
-        Some(frame)
+        self.drain_max(1).pop()
     }
 }
 

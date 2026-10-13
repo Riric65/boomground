@@ -91,6 +91,7 @@ pub fn update(
     lobby: Res<Lobby>,
     shop: Res<crate::shop::ShopState>,
     mut net: ResMut<NetClient>,
+    touch: Res<crate::touch::TouchState>,
     mut field: Query<(&mut TextField, &mut Visibility), With<ChatField>>,
     mut lines: Query<(&ChatLineText, &mut Text, &mut TextColor, &mut BackgroundColor)>,
 ) {
@@ -99,7 +100,7 @@ pub fn update(
     let Ok((mut f, mut vis)) = field.single_mut() else { return };
 
     let can_chat = lobby.chat && net.is_online() && game.phase == Phase::Playing && !game.dead && !shop.open;
-    if !chat.open && can_chat && !game.loading && (keys.just_pressed(KeyCode::KeyT) || keys.just_pressed(KeyCode::Enter)) {
+    if !chat.open && can_chat && !game.loading && (keys.just_pressed(KeyCode::KeyT) || keys.just_pressed(KeyCode::Enter) || touch.chat) {
         chat.open = true;
         f.value.clear();
         f.focused = true;

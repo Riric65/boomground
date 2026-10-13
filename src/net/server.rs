@@ -1613,13 +1613,22 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
             continue;
         };
         let mut alive = true;
+        // Lecture bornée : un client qui inonde le serveur ne bloque plus la
+        // boucle et ne fait plus grossir la mémoire sans fin.
+        let mut read = 0usize;
         loop {
+            if read > 512 * 1024 {
+                break;
+            }
             match read_into(&mut client.stream, &mut client.reader) {
                 Ok(0) => {
                     alive = false;
                     break;
                 }
-                Ok(_) => continue,
+                Ok(n) => {
+                    read += n;
+                    continue;
+                }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(_) => {
                     alive = false;
@@ -1630,7 +1639,10 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
         if !client.joined && client.since.elapsed() > Duration::from_secs(10) {
             alive = false;
         }
-        let frames: Vec<Vec<u8>> = client.reader.drain();
+        if client.reader.pending() > crate::net::protocol::MAX_PENDING {
+            alive = false;
+        }
+        let frames: Vec<Vec<u8>> = client.reader.drain_max(4000);
         for frame in frames {
             if let Some(packet) = Packet::decode(&frame) {
                 handle(&mut server, id, packet);
