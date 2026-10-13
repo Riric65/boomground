@@ -193,7 +193,20 @@ pub struct Vehicle {
     pub alive: bool,
     /// Vitesse (m/s), pour le moteur sonore.
     pub speed: f32,
+    /// Moyeux des roues, repère du corps (relatifs au centre de masse).
+    /// Les deux premières sont à l'avant (côté -Z) et braquent.
+    pub wheels: [Vec3; 4],
+    /// Débattement de suspension utilisé par roue (0 = détendue).
+    pub compress: [f32; 4],
+    /// Angle de braquage actuel (radians, + = gauche).
+    pub steer_angle: f32,
+    /// Rotation des roues (radians), pour l'affichage.
+    pub spin: f32,
 }
+
+/// Rayon des roues (un voxel) et course de la suspension.
+pub const WHEEL_RADIUS: f32 = VOXEL;
+pub const WHEEL_TRAVEL: f32 = 0.3;
 
 impl Body {
     /// Position monde (centre) d'une cellule de la grille.
@@ -358,6 +371,36 @@ impl Sim {
         if cells.len() < 20 {
             return None;
         }
+        // La couche du bas, ce sont les roues en cubes : elles sont
+        // remplacées par de vraies roues (suspension, rotation) et ne font
+        // pas partie de la caisse.
+        let bottom = cells.iter().map(|c| c.y).min()?;
+        let (wheel_cells, cells): (Vec<IVec3>, Vec<IVec3>) = cells.into_iter().partition(|c| c.y == bottom);
+        if cells.len() < 20 {
+            return None;
+        }
+        let lo = cells.iter().fold(IVec3::MAX, |a, c| a.min(*c));
+        let hi = cells.iter().fold(IVec3::MIN, |a, c| a.max(*c));
+        let mid_z = (lo.z + hi.z) as f32 * 0.5;
+        // Moyeu : centre des cubes de roue de chaque coin, à hauteur du haut
+        // de la couche (la roue touche le sol par en dessous).
+        let hub_y = world.cell_min(IVec3::new(0, bottom + 1, 0)).y;
+        let mut hubs = [Vec3::ZERO; 4];
+        for (i, (front, left)) in [(true, true), (true, false), (false, true), (false, false)].into_iter().enumerate() {
+            let pick: Vec<Vec3> = wheel_cells
+                .iter()
+                .filter(|c| ((c.z as f32) < mid_z) == front && (c.x * 2 < lo.x + hi.x) == left)
+                .map(|c| world.cell_center(*c))
+                .collect();
+            let x = if left { world.cell_center(lo).x } else { world.cell_center(hi).x };
+            let z = if front { world.cell_center(lo).z + VOXEL * 1.5 } else { world.cell_center(hi).z - VOXEL * 1.5 };
+            let c = if pick.is_empty() {
+                Vec3::new(x, hub_y, z)
+            } else {
+                pick.iter().copied().sum::<Vec3>() / pick.len() as f32
+            };
+            hubs[i] = Vec3::new(c.x, hub_y, c.z);
+        }
         let orig = cells.len();
         let mut ev = Vec::new();
         let before = self.bodies.len();
@@ -375,6 +418,12 @@ impl Sim {
             grounded: false,
             alive: true,
             speed: 0.0,
+            // Le corps vient d'être créé sans rotation : le repère local est
+            // le repère monde translaté au centre de masse.
+            wheels: hubs.map(|h| h - body.pos),
+            compress: [0.0; 4],
+            steer_angle: 0.0,
+            spin: 0.0,
         });
         Some(body.id)
     }
@@ -684,38 +733,81 @@ impl Sim {
             body.cooldown = (body.cooldown - dt).max(0.0);
             body.lin.y -= GRAVITY * dt;
 
-            // Véhicule : poussée des roues, adhérence latérale, direction.
-            let mut fwd_h = Vec3::ZERO;
+            // Véhicule : quatre roues à suspension (lancer de rayon vers le
+            // sol), adhérence latérale et motricité au point de contact de
+            // chaque roue, braquage des roues avant.
             if let Some(v) = body.vehicle.as_mut() {
                 v.ttl -= dt;
                 let fwd = body.rot * Vec3::NEG_Z;
-                fwd_h = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
-                let right = Vec3::new(-fwd_h.z, 0.0, fwd_h.x);
+                let fwd_h = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+                let up = body.rot * Vec3::Y;
                 let speed_f = body.lin.dot(fwd_h);
                 v.speed = body.lin.length();
-                if v.grounded {
-                    // Adhérence : la voiture ne glisse pas de côté.
-                    let lat = body.lin.dot(right);
-                    body.lin -= right * lat * (1.0 - (-9.0 * dt).exp());
-                    if v.ttl > 0.0 && v.alive {
-                        let mut acc = v.throttle * 16.0;
-                        if (v.throttle > 0.0 && speed_f > 26.0) || (v.throttle < 0.0 && speed_f < -9.0) {
-                            acc = 0.0;
-                        }
-                        body.lin += fwd_h * acc * dt;
-                        let rate = v.steer * 1.8 * (speed_f / 6.0).clamp(-1.0, 1.0);
-                        body.ang.y += (rate - body.ang.y) * (1.0 - (-8.0 * dt).exp());
-                        if v.brake {
-                            let k = (-4.0 * dt).exp();
-                            body.lin.x *= k;
-                            body.lin.z *= k;
-                        }
-                    } else {
-                        // Moteur coupé : frein moteur léger.
-                        let k = (-0.35 * dt).exp();
-                        body.lin.x *= k;
-                        body.lin.z *= k;
+                let driving = v.ttl > 0.0 && v.alive;
+                let target = if driving { v.steer * 0.55 / (1.0 + speed_f.abs() * 0.04) } else { 0.0 };
+                v.steer_angle += (target - v.steer_angle) * (1.0 - (-10.0 * dt).exp());
+                v.spin += speed_f / WHEEL_RADIUS * dt;
+                let rm = Mat3::from_quat(body.rot);
+                let inv_world = rm * body.inv_inertia * rm.transpose();
+                let inv_m = 1.0 / body.mass.max(1e-4);
+                let quarter = body.mass * 0.25;
+                // Raideur : ~12 cm d'enfoncement au repos ; amortissement
+                // proche du critique.
+                let k = body.mass * GRAVITY / (4.0 * 0.12);
+                let c = 2.0 * (k * quarter).sqrt() * 0.7;
+                let reach = WHEEL_RADIUS + WHEEL_TRAVEL;
+                let mut grounded = false;
+                for i in 0..4 {
+                    let hub = body.pos + body.rot * v.wheels[i];
+                    let Some(hit) = world.raycast(hub, -up, reach) else {
+                        v.compress[i] = 0.0;
+                        continue;
+                    };
+                    let dist = hit.point.distance(hub);
+                    let comp = (reach - dist).clamp(0.0, reach);
+                    v.compress[i] = comp;
+                    grounded = true;
+                    let r = hit.point - body.pos;
+                    let vel = body.lin + body.ang.cross(r);
+                    let load = (k * comp - c * vel.dot(up)).max(0.0);
+                    // La suspension pousse au point de contact ; l'adhérence et
+                    // la motricité agissent presque à hauteur du centre de
+                    // masse (sinon la voiture se couche au premier virage).
+                    let jn = up * (load * dt);
+                    body.lin += jn * inv_m;
+                    body.ang += inv_world * r.cross(jn);
+                    let r = r - up * (r.dot(up) * 0.85);
+                    let mut j = Vec3::ZERO;
+                    // Direction de la roue (les avant braquent).
+                    let mut wf = fwd;
+                    if i < 2 {
+                        wf = Quat::from_axis_angle(up, v.steer_angle) * wf;
                     }
+                    let wf = (wf - up * wf.dot(up)).normalize_or_zero();
+                    let wr = wf.cross(up);
+                    // Adhérence latérale, limitée par la charge de la roue.
+                    let lat = vel.dot(wr);
+                    let grip = 1.1 * load * dt;
+                    j += wr * (-lat * quarter).clamp(-grip, grip);
+                    let roll = vel.dot(wf);
+                    if driving {
+                        let mut drive = v.throttle * 14.0 * quarter * dt;
+                        if (v.throttle > 0.0 && speed_f > 26.0) || (v.throttle < 0.0 && speed_f < -9.0) {
+                            drive = 0.0;
+                        }
+                        j += wf * drive.clamp(-grip, grip);
+                    }
+                    // Frein (ou frein moteur léger sans conducteur).
+                    let brake = if driving && v.brake { 0.12 } else if driving { 0.004 } else { 0.03 };
+                    j -= wf * (roll * quarter * brake).clamp(-grip, grip);
+                    body.lin += j * inv_m;
+                    body.ang += inv_world * r.cross(j);
+                }
+                v.grounded = grounded;
+                if grounded {
+                    // Barre anti-roulis : amortit le roulis et le tangage.
+                    let yaw = up * body.ang.dot(up);
+                    body.ang = yaw + (body.ang - yaw) * (-6.0 * dt).exp();
                 }
                 // Intégrité : en dessous de 60 % des voxels, il ne roule plus.
                 v.alive = body.grid.count() * 100 >= v.orig * 60;
@@ -793,12 +885,7 @@ impl Sim {
                         body.ang += inv_world * (c.r.cross(c.n * j));
                         // Frottement de Coulomb.
                         let vel = body.lin + body.ang.cross(c.r);
-                        let mut vt = vel - c.n * vel.dot(c.n);
-                        // Roues : elles roulent librement dans le sens de la
-                        // marche, seul le dérapage latéral est freiné.
-                        if body.vehicle.is_some() {
-                            vt -= fwd_h * vt.dot(fwd_h);
-                        }
+                        let vt = vel - c.n * vel.dot(c.n);
                         let vt_len = vt.length();
                         if vt_len > 1e-4 {
                             let t = vt / vt_len;
@@ -821,9 +908,6 @@ impl Sim {
                 // Amortissement au contact : un corps posé s'immobilise.
                 body.lin *= 1.0 - 2.5 * dt;
                 body.ang *= 1.0 - 5.0 * dt;
-                if let Some(v) = body.vehicle.as_mut() {
-                    v.grounded = true;
-                }
                 body.rest = if body.lin.length() < 0.6 && body.ang.length() < 0.5 {
                     body.rest + dt
                 } else {
@@ -831,9 +915,6 @@ impl Sim {
                 };
             } else {
                 body.rest = 0.0;
-                if let Some(v) = body.vehicle.as_mut() {
-                    v.grounded = false;
-                }
             }
             body.lin *= 1.0 - 0.01 * dt * 60.0;
             body.ang *= 1.0 - 0.06 * dt * 60.0;
@@ -1829,6 +1910,37 @@ mod tests {
             sim.blocks.len()
         );
         assert!(sim.bodies.is_empty(), "tout s'est figé en {steps} pas");
+    }
+
+    #[test]
+    fn vehicle_turns_and_stays_upright() {
+        let mut w = flat_world();
+        let mut sim = Sim::new();
+        let mut cells = Vec::new();
+        for x in 50..55 {
+            for y in 6..9 {
+                for z in 50..61 {
+                    cells.push(IVec3::new(x, y, z));
+                }
+            }
+        }
+        let id = sim.form_vehicle(&w, cells).expect("véhicule");
+        let mut ev = Vec::new();
+        for _ in 0..150 {
+            if let Some(b) = sim.body_mut(id) {
+                let v = b.vehicle.as_mut().unwrap();
+                v.throttle = 1.0;
+                v.steer = 1.0;
+                v.ttl = 0.3;
+            }
+            sim.step(&mut w, 1.0 / 60.0, &mut ev);
+        }
+        let b = sim.body(id).unwrap();
+        let fwd = b.rot * Vec3::NEG_Z;
+        let heading = fwd.x.atan2(-fwd.z).to_degrees().abs();
+        assert!(heading > 30.0, "la voiture tourne : {heading:.0}°");
+        assert!((b.rot * Vec3::Y).y > 0.8, "reste sur ses roues");
+        assert!(b.vehicle.as_ref().unwrap().grounded, "roues au sol");
     }
 
     #[test]

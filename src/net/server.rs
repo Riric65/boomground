@@ -1548,6 +1548,21 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
                 .map(|b| (b.id, b.pos, b.rot.to_array()))
                 .collect();
             broadcast(&mut server, None, &Packet::BodyPose { list });
+            let wheels: Vec<(u32, [Vec3; 4], f32, f32)> = server
+                .sim
+                .bodies
+                .iter()
+                .filter_map(|b| {
+                    let v = b.vehicle.as_ref()?;
+                    let centers = std::array::from_fn(|i| {
+                        v.wheels[i] - Vec3::Y * (crate::sim::WHEEL_TRAVEL - v.compress[i])
+                    });
+                    Some((b.id, centers, v.steer_angle, v.spin))
+                })
+                .collect();
+            if !wheels.is_empty() {
+                broadcast(&mut server, None, &Packet::Wheels { list: wheels });
+            }
         }
     }
 

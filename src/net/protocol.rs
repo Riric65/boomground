@@ -122,6 +122,9 @@ pub enum Packet {
     BodyPose { list: Vec<(u32, Vec3, [f32; 4])> },
     /// Serveur → clients : un corps s'est figé ou a disparu.
     BodyRemove { id: u32 },
+    /// Serveur → clients : roues des véhicules `(id, centres des roues dans
+    /// le repère du corps, braquage, rotation)`.
+    Wheels { list: Vec<(u32, [Vec3; 4], f32, f32)> },
     /// Serveur → client : inventaire autoritaire.
     Inv { money: u32, earned: u32, slots: Vec<[u32; 3]> },
     /// Client → serveur : recharge l'arme en main.
@@ -459,6 +462,18 @@ impl Packet {
                     }
                 }
             }
+            Packet::Wheels { list } => {
+                w.u8(46);
+                w.u16(list.len() as u16);
+                for (id, centers, steer, spin) in list {
+                    w.u32(*id);
+                    for c in centers {
+                        w.vec3(*c);
+                    }
+                    w.f32(*steer);
+                    w.f32(*spin);
+                }
+            }
             Packet::BodyRemove { id } => {
                 w.u8(25);
                 w.u32(*id);
@@ -733,6 +748,21 @@ impl Packet {
                 Packet::BodyPose { list }
             }
             25 => Packet::BodyRemove { id: cur.u32()? },
+            46 => {
+                let n = cur.u16()?;
+                let mut list = Vec::with_capacity(n.min(512) as usize);
+                for _ in 0..n {
+                    let id = cur.u32()?;
+                    let centers = [cur.vec3()?, cur.vec3()?, cur.vec3()?, cur.vec3()?];
+                    let steer = cur.f32()?;
+                    let spin = cur.f32()?;
+                    if !steer.is_finite() || !spin.is_finite() || centers.iter().any(|c| !c.is_finite()) {
+                        return None;
+                    }
+                    list.push((id, centers, steer, spin));
+                }
+                Packet::Wheels { list }
+            }
             26 => {
                 let money = cur.u32()?;
                 let earned = cur.u32()?;

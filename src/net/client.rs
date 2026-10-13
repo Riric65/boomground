@@ -302,6 +302,7 @@ pub struct ReceiveExtras<'w, 's> {
     particles: Res<'w, crate::fx::ParticleAssets>,
     density: Res<'w, crate::fx::ParticleDensity>,
     puffs: Query<'w, 's, (), With<crate::fx::Puff>>,
+    wheels: ResMut<'w, crate::vehicle::WheelPoses>,
 }
 
 /// Applique ce que le serveur a décidé.
@@ -333,6 +334,7 @@ pub fn receive(
         ref particles,
         ref density,
         ref puffs,
+        ref mut wheels,
     } = fx_params;
     let camera_pos = camera.single().map(|c| c.translation()).unwrap_or(Vec3::ZERO);
     if !d.net.is_online() {
@@ -469,6 +471,11 @@ pub fn receive(
             }
             Packet::BodyPose { list } => {
                 mirror.pose_bodies(&list, net_bodies);
+            }
+            Packet::Wheels { list } => {
+                for (id, centers, steer, spin) in list {
+                    wheels.0.insert(id, (centers, steer, spin));
+                }
             }
             Packet::BodyRemove { id } => {
                 if let Some(e) = mirror.body_entity(id) {

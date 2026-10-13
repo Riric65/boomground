@@ -188,3 +188,70 @@ pub fn engine_sound(
         }
     }
 }
+
+/// Roues des véhicules reçues du serveur : centres (repère du corps),
+/// braquage et rotation.
+#[derive(Resource, Default)]
+pub struct WheelPoses(pub std::collections::HashMap<u32, ([Vec3; 4], f32, f32)>);
+
+/// Une roue affichée, enfant du corps du véhicule.
+#[derive(Component)]
+pub struct WheelVis {
+    body: u32,
+    index: usize,
+}
+
+/// Crée et anime les roues (cylindres) des véhicules.
+pub fn wheels(
+    mut commands: Commands,
+    mut poses: ResMut<WheelPoses>,
+    mirror: Res<Mirror>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut assets: Local<Option<(Handle<Mesh>, Handle<StandardMaterial>)>>,
+    mut shown: Local<std::collections::HashMap<u32, [Entity; 4]>>,
+    mut wheels: Query<(&WheelVis, &mut Transform)>,
+) {
+    // Véhicules disparus : leurs roues partent avec le corps (enfants), on
+    // oublie juste l'entrée.
+    shown.retain(|id, _| mirror.body_entity(*id).is_some());
+    poses.0.retain(|id, _| mirror.body_entity(*id).is_some());
+    let (mesh, mat) = assets
+        .get_or_insert_with(|| {
+            (
+                meshes.add(Cylinder::new(crate::sim::WHEEL_RADIUS, 0.32)),
+                materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.07, 0.07, 0.08),
+                    perceptual_roughness: 0.85,
+                    ..default()
+                }),
+            )
+        })
+        .clone();
+    for (&id, (centers, _, _)) in &poses.0 {
+        if shown.contains_key(&id) {
+            continue;
+        }
+        let Some(body) = mirror.body_entity(id) else { continue };
+        let list = std::array::from_fn(|index| {
+            commands
+                .spawn((
+                    WheelVis { body: id, index },
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(mat.clone()),
+                    Transform::from_translation(centers[index]),
+                    ChildOf(body),
+                ))
+                .id()
+        });
+        shown.insert(id, list);
+    }
+    for (w, mut t) in &mut wheels {
+        let Some((centers, steer, spin)) = poses.0.get(&w.body) else { continue };
+        t.translation = centers[w.index];
+        // Axe du cylindre (Y) couché sur X, puis rotation de roulement et
+        // braquage des roues avant.
+        let steer = if w.index < 2 { *steer } else { 0.0 };
+        t.rotation = Quat::from_rotation_y(steer) * Quat::from_rotation_x(-*spin) * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    }
+}

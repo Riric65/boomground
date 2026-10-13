@@ -73,6 +73,7 @@ pub fn run() {
         .init_resource::<net::lan::LanBrowser>()
         .init_resource::<ui::Toasts>()
         .init_resource::<touch::TouchState>()
+        .init_resource::<vehicle::WheelPoses>()
         .add_message::<weapon::Blast>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -209,7 +210,7 @@ pub fn run() {
                 hud::loading_screen,
                 hud::damage_overlay,
                 rpc::update.run_if(desktop),
-                vehicle::controls,
+                (vehicle::controls, vehicle::wheels),
                 vehicle::engine_sound,
                 voice::update.run_if(desktop),
                 voice::indicator.run_if(desktop),
