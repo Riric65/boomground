@@ -448,14 +448,14 @@ pub fn update(
     let mut values: Vec<(HudLabel, String)> = Vec::new();
     // --- Argent / mode ---
     let money = match game.mode {
-        Mode::Sandbox => "BAC À SABLE".to_string(),
+        Mode::Sandbox => crate::i18n::t("BAC À SABLE"),
         Mode::Normal => format!("{} $", thousands(game.money)),
     };
     values.push((HudLabel::Money, money));
     let destroyed = world.total.saturating_sub(world.alive);
-    let mut info = format!("Seed {} · {} voxels détruits", world.seed, thousands(destroyed));
+    let mut info = crate::i18n::tf("Seed {} · {} voxels détruits", &[&world.seed, &thousands(destroyed)]);
     if lobby.active && !lobby.solo {
-        info.push_str(&format!(" · {} en ligne", lobby.players.len()));
+        info.push_str(&crate::i18n::tf(" · {} en ligne", &[&lobby.players.len()]));
     }
     values.push((HudLabel::Info, info));
 
@@ -494,27 +494,27 @@ pub fn update(
     let infinite = game.sandbox();
     let (ammo, hint) = match spec.kind {
         Kind::Gun => {
-            let reserve = if infinite { "illimitée".to_string() } else { slot.reserve.to_string() };
+            let reserve = if infinite { crate::i18n::t("illimitée") } else { slot.reserve.to_string() };
             let hint = if hands.reload > 0.0 {
-                "Rechargement…".to_string()
+                crate::i18n::t("Rechargement…")
             } else if slot.mag == 0 {
-                "R pour recharger".to_string()
+                crate::i18n::t("R pour recharger")
             } else {
-                format!("réserve : {reserve}")
+                crate::i18n::tf("réserve : {}", &[&reserve])
             };
             (format!("{} / {}", slot.mag, spec.mag), hint)
         }
         Kind::Thrown | Kind::Placed => {
-            let stock = if infinite { "illimité".to_string() } else { format!("× {}", slot.reserve) };
+            let stock = if infinite { crate::i18n::t("illimité") } else { format!("× {}", slot.reserve) };
             let hint = if spec.remote {
                 let placed = bombs.iter().filter(|b| b.local && b.id == id).count();
-                format!("{placed} posée(s) · {} : BOUM", if crate::touch::is_touch_platform() { "ALT" } else { "clic droit" })
+                crate::i18n::tf("{} posée(s) · {} : BOUM", &[&placed, &if crate::touch::is_touch_platform() { "ALT".to_string() } else { crate::i18n::t("clic droit") }])
             } else if spec.trigger > 0.0 {
-                "Mine : se déclenche à l'approche".to_string()
+                crate::i18n::t("Mine : se déclenche à l'approche")
             } else if spec.kind == Kind::Placed && spec.fuse > 0.0 {
-                format!("Minuterie de {:.0} s : cours !", spec.fuse)
+                crate::i18n::tf("Minuterie de {} s : cours !", &[&format!("{:.0}", spec.fuse)])
             } else {
-                if crate::touch::is_touch_platform() { "TIR : lancer" } else { "Clic gauche : lancer" }.to_string()
+                crate::i18n::t(if crate::touch::is_touch_platform() { "TIR : lancer" } else { "Clic gauche : lancer" })
             };
             (stock, hint)
         }
@@ -525,13 +525,13 @@ pub fn update(
         Kind::Melee => (
             format!("{:.1} m", spec.radius),
             if spec.auto {
-                "Maintiens le clic".to_string()
+                crate::i18n::t("Maintiens le clic")
             } else {
-                "Rayon de destruction".to_string()
+                crate::i18n::t("Rayon de destruction")
             },
         ),
     };
-    values.push((HudLabel::WeaponName, spec.name.to_string()));
+    values.push((HudLabel::WeaponName, crate::i18n::t(spec.name)));
     values.push((HudLabel::Ammo, ammo));
     values.push((HudLabel::Hint, hint));
     if let Ok(mut bar) = nodes.p1().single_mut() {
@@ -560,7 +560,7 @@ pub fn update(
         }
     }
     let death = if game.dead {
-        format!("Tu es mort · réapparition dans {:.0} s", game.respawn_in.ceil().max(0.0))
+        crate::i18n::tf("Tu es mort · réapparition dans {} s", &[&format!("{:.0}", game.respawn_in.ceil().max(0.0))])
     } else {
         String::new()
     };
@@ -575,10 +575,10 @@ pub fn update(
         }
     }
     if show_players {
-        let mut list = format!("Code : {}\n", crate::menu::lobby_code(&lobby));
+        let mut list = crate::i18n::tf("Code : {}", &[&crate::menu::lobby_code(&lobby)]) + "\n";
         for (pid, name) in &lobby.players {
-            let host = if *pid == lobby.host_id { "  (hôte)" } else { "" };
-            let me = if Some(*pid) == net.id { "  ← toi" } else { "" };
+            let host = if *pid == lobby.host_id { crate::i18n::t("  (hôte)") } else { String::new() };
+            let me = if Some(*pid) == net.id { crate::i18n::t("  ← toi") } else { String::new() };
             list.push_str(&format!("\n•  {name}{host}{me}"));
         }
         values.push((HudLabel::Players, list));
@@ -617,7 +617,7 @@ pub fn update(
         let n = all_owned.iter().filter(|w| w.cat() == chip.0).count();
         let active = chip.0 == current_cat;
         let c = if active { ui::ACCENT } else if n == 0 { Color::srgba(1.0, 1.0, 1.0, 0.25) } else { ui::TEXT };
-        let value = format!("{} {}", chip.0.index() + 1, chip.0.name());
+        let value = format!("{} {}", chip.0.index() + 1, crate::i18n::t(chip.0.name()));
         if text.0 != value {
             text.0 = value;
         }
@@ -635,7 +635,7 @@ pub fn update(
                 Some(index) => format!("{}", index + 1),
                 _ => String::new(),
             },
-            HotbarText::Name(id) => id.spec().short.to_string(),
+            HotbarText::Name(id) => crate::i18n::t(id.spec().short),
             HotbarText::Count(id) => {
                 let s = game.slot(id);
                 match id.kind() {
@@ -730,15 +730,15 @@ pub fn loading_screen(
         }
     }
     for mut t in &mut text {
-        let s = if game.booting {
+        let s = crate::i18n::t(if game.booting {
             "Chargement…"
         } else if loading.installed_at.is_none() {
             "Génération de la ville…"
         } else {
             "Chargement du terrain…"
-        };
+        });
         if t.0 != s {
-            t.0 = s.to_string();
+            t.0 = s;
         }
     }
 }

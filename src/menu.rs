@@ -107,6 +107,7 @@ pub enum SettingKind {
     JoystickSide,
     /// Sensibilité du regard au doigt (mobile).
     TouchSensitivity,
+    Language,
 }
 
 #[derive(Component)]
@@ -722,6 +723,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                             node.row_gap = px(2.0);
                             cols.spawn((ui::card(), shadow())).insert(node.clone()).with_children(|c| {
                                 c.spawn(ui::text(&font, "JEU ET CONTRÔLES", 13.0, ui::MUTED));
+                                setting_row(c, &font, "Langue", SettingKind::Language);
                                 let touch = crate::touch::is_touch_platform();
                                 if !touch {
                                     setting_row(c, &font, "Sensibilité de la souris", SettingKind::Sensitivity);
@@ -1320,7 +1322,7 @@ pub fn actions(
             MenuAction::CopyCode => {
                 let code = lobby_code(&lobby);
                 if copy_to_clipboard(&code) {
-                    toasts.push(format!("Code copié : {code}"));
+                    toasts.push(crate::i18n::tf("Code copié : {}", &[&code]));
                 } else {
                     toasts.push("Copie impossible : note le code à la main");
                 }
@@ -1411,6 +1413,7 @@ pub fn actions(
                         settings.joystick_side = (settings.joystick_side as i32 + dir as i32).rem_euclid(2) as u8
                     }
                     SettingKind::TouchSensitivity => settings.touch_sensitivity *= if dir > 0 { 1.15 } else { 1.0 / 1.15 },
+                    SettingKind::Language => settings.lang = (settings.lang as i32 + dir as i32).rem_euclid(4) as u8,
                     SettingKind::Fps => {
                         settings.fps_limit = match (settings.fps_limit <= 0.0, dir > 0) {
                             (true, true) => 0.0,
@@ -1924,6 +1927,7 @@ pub fn settings_panel(
             SettingKind::Shake => format!("{:.0} %", settings.shake * 100.0),
             SettingKind::JoystickSide => ["gauche", "droite"][settings.joystick_side.min(1) as usize].to_string(),
             SettingKind::TouchSensitivity => format!("{:.0} %", settings.touch_sensitivity / 0.005 * 100.0),
+            SettingKind::Language => crate::i18n::NAMES[settings.lang.min(3) as usize].to_string(),
             SettingKind::Fps => {
                 if settings.fps_limit <= 0.0 {
                     "écran".to_string()
@@ -1932,6 +1936,7 @@ pub fn settings_panel(
                 }
             }
         };
+        let v = crate::i18n::t(&v);
         for child in children.iter() {
             if let Ok(mut t) = texts.get_mut(child) {
                 if t.0 != v {
@@ -1948,8 +1953,9 @@ pub fn status_text(state: Res<MenuState>, mut text: Query<&mut Text, With<Status
         return;
     }
     for mut t in &mut text {
-        if t.0 != state.status {
-            t.0 = state.status.clone();
+        let v = crate::i18n::t(&state.status);
+        if t.0 != v {
+            t.0 = v;
         }
     }
 }

@@ -281,7 +281,7 @@ pub fn interact(
         }
         Some(Err(e)) => {
             fx::play(&mut commands, &bank, SfxKind::Empty, 0.6);
-            toasts.push(format!("Impossible : {e}"));
+            toasts.push(crate::i18n::tf("Impossible : {}", &[&crate::i18n::t(&e.to_string())]));
         }
         None => {}
     }

@@ -706,6 +706,8 @@ pub struct Settings {
     pub joystick_side: u8,
     /// Sensibilité du regard au doigt (radian par pixel d'écran).
     pub touch_sensitivity: f32,
+    /// Langue de l'interface (0 FR, 1 EN, 2 ES, 3 DE).
+    pub lang: u8,
 }
 
 /// Noms des préréglages graphiques.
@@ -766,6 +768,7 @@ impl Settings {
             voice_volume: 0.8,
             joystick_side: 0,
             touch_sensitivity: 0.005,
+            lang: crate::i18n::system_default(),
         }
     }
 }
@@ -797,6 +800,7 @@ impl Settings {
         self.voice_volume = self.voice_volume.clamp(0.0, 1.0);
         self.joystick_side = self.joystick_side.min(1);
         self.touch_sensitivity = self.touch_sensitivity.clamp(0.001, 0.02);
+        self.lang = self.lang.min(3);
         self.quality = self.quality.min(4);
         self.particles = self.particles.min(2);
         // Un ancien réglage « 2× » est ramené à 4× : les pilotes
@@ -861,6 +865,7 @@ voice_mode={}
 voice_volume={}
 joystick_side={}
 touch_sensitivity={}
+lang={}
 ",
         s.name,
         s.sensitivity,
@@ -884,7 +889,8 @@ touch_sensitivity={}
         s.voice_mode,
         s.voice_volume,
         s.joystick_side,
-        s.touch_sensitivity
+        s.touch_sensitivity,
+        s.lang
     );
     let _ = std::fs::write(dir.join("settings.txt"), body);
 }
@@ -925,6 +931,7 @@ pub fn load_settings() -> Settings {
             "voice_volume" => s.voice_volume = v.parse().unwrap_or(s.voice_volume),
             "joystick_side" => s.joystick_side = v.parse().unwrap_or(s.joystick_side),
             "touch_sensitivity" => s.touch_sensitivity = v.parse().unwrap_or(s.touch_sensitivity),
+            "lang" => s.lang = v.parse().unwrap_or(s.lang),
             _ => {}
         }
     }

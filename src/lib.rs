@@ -13,6 +13,7 @@ pub mod debug;
 pub mod fx;
 pub mod game;
 pub mod hud;
+pub mod i18n;
 pub mod install;
 pub mod map;
 pub mod menu;
@@ -226,6 +227,7 @@ pub fn run() {
             ),
         )
         .add_systems(PostStartup, crashlog::show_last)
+        .add_systems(Update, i18n::retranslate)
         .add_systems(Update, chat::update.after(ui::text_fields))
         .add_systems(Last, (perf::detect_refresh, perf::limit).chain())
         .run();

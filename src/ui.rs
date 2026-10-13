@@ -48,8 +48,16 @@ pub fn setup_font(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
 
 /// Texte simple.
 pub fn text(font: &UiFont, value: impl Into<String>, size: f32, color: Color) -> impl Bundle {
+    text_tr(font, value.into(), false, size, color)
+}
+
+/// Texte traduit (et retraduit si la langue change) ; `upper` le met en
+/// capitales après traduction.
+fn text_tr(font: &UiFont, value: String, upper: bool, size: f32, color: Color) -> impl Bundle {
+    let shown = if upper { crate::i18n::t(&value).to_uppercase() } else { crate::i18n::t(&value) };
     (
-        Text::new(value.into()),
+        crate::i18n::Tr(value, upper),
+        Text::new(shown),
         TextFont {
             font: font.0.clone().into(),
             font_size: FontSize::Px(size),
@@ -67,7 +75,7 @@ pub fn label(font: &UiFont, value: impl Into<String>, size: f32, color: Color) -
 /// Petit titre de section en capitales espacées.
 pub fn caption(font: &UiFont, value: &str) -> impl Bundle {
     (
-        text(font, value.to_uppercase(), 13.0, MUTED),
+        text_tr(font, value.to_string(), true, 13.0, MUTED),
         Node {
             margin: UiRect::bottom(px(6.0)),
             ..default()
@@ -405,7 +413,7 @@ pub struct Toasts {
 
 impl Toasts {
     pub fn push(&mut self, message: impl Into<String>) {
-        self.queue.push(message.into());
+        self.queue.push(crate::i18n::t(&message.into()));
     }
 }
 

@@ -418,12 +418,12 @@ pub fn receive(
                 let me = d.net.id;
                 for (id, name) in &players {
                     if Some(*id) != me && lobby.active && !lobby.players.iter().any(|(p, _)| p == id) {
-                        toasts.push(format!("{name} a rejoint la partie"));
+                        toasts.push(crate::i18n::tf("{} a rejoint la partie", &[&name]));
                     }
                 }
                 for (id, name) in &lobby.players {
                     if !players.iter().any(|(p, _)| p == id) {
-                        toasts.push(format!("{name} est parti"));
+                        toasts.push(crate::i18n::tf("{} est parti", &[&name]));
                     }
                 }
                 lobby.host_id = host;
