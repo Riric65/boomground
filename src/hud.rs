@@ -690,16 +690,17 @@ pub fn loading_screen(
             game.loading_progress = 0.45 + 0.55 * meshed.clamp(0.0, 1.0);
             let waited = loading.installed_at.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
             // Prêt : le terrain proche est maillé (et on a attendu un peu).
-            if pending == 0 && waited > 0.8 {
+            // En ligne, le serveur envoie des modifications en continu : un
+            // petit reste à mailler ne doit pas bloquer le chargement (il
+            // remettait le compteur à zéro indéfiniment).
+            if pending <= 64 && waited > 0.8 {
                 // Quelques instants de plus : envoi des maillages au GPU,
                 // compilation des shaders.
                 *calm += time.delta_secs();
-                if *calm > 0.9 {
-                    game.loading = false;
-                    game.loading_progress = 1.0;
-                }
-            } else {
-                *calm = 0.0;
+            }
+            if *calm > 0.9 || waited > 25.0 {
+                game.loading = false;
+                game.loading_progress = 1.0;
             }
         }
     }

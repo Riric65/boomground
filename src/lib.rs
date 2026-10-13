@@ -134,7 +134,6 @@ pub fn run() {
                 // sont des nœuds plein écran « pickables » qui avalerait la
                 // souris si elles restaient présentes.
                 touch::pointer.run_if(touch::on_touch),
-                touch::fire_button.run_if(touch::on_touch),
                 touch::layout.run_if(touch::on_touch),
                 ui::text_fields,
                 ui::switches,
@@ -220,6 +219,7 @@ pub fn run() {
                 menu::map_size_highlight,
                 window_icon.run_if(desktop),
                 touch::clear.run_if(touch::on_touch),
+                ui::soft_keyboard.run_if(touch::on_touch),
                 ui_scale,
             ),
         )

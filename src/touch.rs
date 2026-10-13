@@ -14,9 +14,7 @@
 //! même temps, et deux doigts fonctionnent (un pour marcher, un pour tirer).
 
 use bevy::picking::events::{PointerDrag, PointerDragEnd, PointerPress, PointerRelease};
-use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
-use bevy::ui::Pressed;
 
 use crate::game::{GameState, Phase, Settings};
 use crate::shop::ShopState;
@@ -289,106 +287,143 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
 // Lecture des doigts
 // ---------------------------------------------------------------------------
 
-/// Le doigt qui tient le joystick, et l'endroit où il s'est posé.
+/// Rôle d'un doigt, décidé à l'endroit où il s'est posé.
+#[derive(Clone, Copy, PartialEq)]
+enum Role {
+    Stick,
+    Look,
+    Fire,
+}
+
+/// Doigts en cours et origine du joystick.
 #[derive(Default)]
-pub struct Stick {
-    pointer: Option<String>,
+pub struct Fingers {
+    roles: Vec<(String, Role)>,
     origin: Vec2,
 }
 
-/// Identifiant du pointeur (souris ou doigt) sous forme de texte, pour les
-/// comparer sans dépendre du type interne.
+impl Fingers {
+    fn role(&self, key: &str) -> Option<Role> {
+        self.roles.iter().find(|(k, _)| k == key).map(|(_, r)| *r)
+    }
+    fn has(&self, role: Role) -> bool {
+        self.roles.iter().any(|(_, r)| *r == role)
+    }
+    fn release(&mut self, key: &str) {
+        self.roles.retain(|(k, _)| k != key);
+    }
+}
+
+/// Identifiant du pointeur (souris ou doigt) sous forme de texte.
 fn pointer_key(pointer: &bevy::picking::events::Pointer) -> String {
     format!("{:?}", pointer.id)
 }
 
-/// Traduit les événements de pointeur en [`TouchState`] et déplace le
-/// joystick.
+/// Ce qui a été touché : on remonte les parents (le doigt tombe souvent sur
+/// le texte d'un bouton, pas sur le bouton).
+enum Hit {
+    Button(Action),
+    Move,
+    Look,
+    Nothing,
+}
+
+fn resolve(
+    mut e: Entity,
+    buttons: &Query<&TouchButton>,
+    moves: &Query<(), With<MoveZone>>,
+    looks: &Query<(), With<LookZone>>,
+    parents: &Query<&ChildOf>,
+) -> Hit {
+    for _ in 0..6 {
+        if let Ok(b) = buttons.get(e) {
+            return Hit::Button(b.0);
+        }
+        if moves.get(e).is_ok() {
+            return Hit::Move;
+        }
+        if looks.get(e).is_ok() {
+            return Hit::Look;
+        }
+        match parents.get(e) {
+            Ok(p) => e = p.parent(),
+            Err(_) => break,
+        }
+    }
+    Hit::Nothing
+}
+
+/// Traduit les doigts en [`TouchState`] : joystick dans sa zone seulement,
+/// regard dans l'autre, boutons n'importe où.
+#[allow(clippy::too_many_arguments)]
 pub fn pointer(
     mut state: ResMut<TouchState>,
     settings: Res<Settings>,
     ui_scale: Res<UiScale>,
-    mut stick: Local<Stick>,
+    mut fingers: Local<Fingers>,
     mut press: MessageReader<PointerPress>,
     mut drags: MessageReader<PointerDrag>,
     mut drag_end: MessageReader<PointerDragEnd>,
     mut release: MessageReader<PointerRelease>,
-    zones: Query<(), Or<(With<MoveZone>, With<LookZone>)>>,
     buttons: Query<&TouchButton>,
-    // `Without<…>` croisé : sans lui, Bevy refuse deux `&mut Node` sur des
-    // filtres qui ne sont pas prouvés disjoints (erreur B0001).
+    moves: Query<(), With<MoveZone>>,
+    looks: Query<(), With<LookZone>>,
+    parents: Query<&ChildOf>,
     mut base: Query<&mut Node, (With<StickBase>, Without<StickKnob>)>,
     mut knob: Query<&mut Node, (With<StickKnob>, Without<StickBase>)>,
 ) {
-    let sensitivity = settings.touch_sensitivity;
-    let mut move_value = Vec2::ZERO;
+    let mut move_value = state.stick;
     let mut look_delta = Vec2::ZERO;
 
     for event in press.read() {
-        if event.button != PointerButton::Primary {
-            continue;
-        }
-        if zones.get(event.entity).is_err() {
-            // Un bouton d'action.
-            if let Ok(button) = buttons.get(event.entity) {
-                match button.0 {
-                    Action::Jump => state.jump = true,
-                    Action::Reload => state.reload = true,
-                    Action::Interact => state.interact = true,
-                    Action::Alt => state.alt = true,
-                    Action::PrevWeapon => state.cycle = -1,
-                    Action::NextWeapon => state.cycle = 1,
-                    Action::Category(i) => state.category = Some(i),
-                    Action::Fire => {}
-                }
+        let key = pointer_key(&event.pointer);
+        match resolve(event.entity, &buttons, &moves, &looks, &parents) {
+            Hit::Button(Action::Fire) => fingers.roles.push((key, Role::Fire)),
+            Hit::Button(action) => match action {
+                Action::Jump => state.jump = true,
+                Action::Reload => state.reload = true,
+                Action::Interact => state.interact = true,
+                Action::Alt => state.alt = true,
+                Action::PrevWeapon => state.cycle = -1,
+                Action::NextWeapon => state.cycle = 1,
+                Action::Category(i) => state.category = Some(i),
+                Action::Fire => {}
+            },
+            Hit::Move if !fingers.has(Role::Stick) => {
+                fingers.origin = event.pointer.position / ui_scale.0.max(0.01);
+                fingers.roles.push((key, Role::Stick));
+                move_value = Vec2::ZERO;
             }
-            continue;
-        }
-        // Premier doigt de la zone de déplacement : il pilote le joystick.
-        if stick.pointer.is_none() {
-            stick.pointer = Some(pointer_key(&event.pointer));
-            stick.origin = event.pointer.position / ui_scale.0.max(0.01);
+            Hit::Move | Hit::Look => fingers.roles.push((key, Role::Look)),
+            Hit::Nothing => {}
         }
     }
 
     for event in drags.read() {
-        if event.button != PointerButton::Primary {
-            continue;
-        }
-        let key = pointer_key(&event.pointer);
-        if stick.pointer.as_deref() == Some(key.as_str()) {
-            // `PointerDrag` porte le déplacement depuis le début du glissé
-            // (`distance`) et depuis la dernière image (`delta`) : on se
-            // sert du premier, ramené au rayon du joystick.
-            let delta = event.distance / STICK_RADIUS;
-            move_value = if delta.length() > 1.0 {
-                delta.normalize()
-            } else {
-                delta
-            };
-        } else if zones.get(event.entity).is_ok() {
-            look_delta += event.delta;
+        match fingers.role(&pointer_key(&event.pointer)) {
+            Some(Role::Stick) => {
+                let d = event.distance / STICK_RADIUS;
+                move_value = if d.length() > 1.0 { d.normalize() } else { d };
+            }
+            // Le tir se vise aussi en glissant le doigt.
+            Some(Role::Look) | Some(Role::Fire) => look_delta += event.delta,
+            None => {}
         }
     }
-
     for event in drag_end.read() {
-        if stick.pointer.as_deref() == Some(pointer_key(&event.pointer).as_str()) {
-            stick.pointer = None;
-        }
+        fingers.release(&pointer_key(&event.pointer));
     }
     for event in release.read() {
-        if stick.pointer.as_deref() == Some(pointer_key(&event.pointer).as_str()) {
-            stick.pointer = None;
-        }
+        fingers.release(&pointer_key(&event.pointer));
     }
 
-    // --- Joystick ---
-    if stick.pointer.is_some() {
+    state.fire = fingers.has(Role::Fire);
+    if fingers.has(Role::Stick) {
         state.stick = move_value;
         if let Ok(mut b) = base.single_mut() {
             b.display = Display::Flex;
-            b.left = px(stick.origin.x - STICK_RADIUS);
-            b.top = px(stick.origin.y - STICK_RADIUS);
+            b.left = px(fingers.origin.x - STICK_RADIUS);
+            b.top = px(fingers.origin.y - STICK_RADIUS);
         }
         if let Ok(mut k) = knob.single_mut() {
             k.left = px(move_value.x * STICK_RADIUS);
@@ -399,24 +434,8 @@ pub fn pointer(
         if let Ok(mut b) = base.single_mut() {
             b.display = Display::None;
         }
-        if let Ok(mut k) = knob.single_mut() {
-            k.left = px(0.0);
-            k.top = px(0.0);
-        }
     }
-
-    // --- Regard ---
-    state.look = look_delta * sensitivity;
-}
-
-/// Le bouton *tir* est le seul qui reste enfoncé : on lit son état à chaque
-/// image plutôt que sur un appui.
-pub fn fire_button(buttons: Query<(&TouchButton, Has<Pressed>)>, mut state: ResMut<TouchState>) {
-    for (button, pressed) in &buttons {
-        if button.0 == Action::Fire {
-            state.fire = pressed;
-        }
-    }
+    state.look = look_delta * settings.touch_sensitivity;
 }
 
 /// Le côté du joystick (gauche ou droite) et la visibilité des commandes.

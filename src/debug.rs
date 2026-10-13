@@ -225,7 +225,10 @@ impl Default for Auto {
                     .unwrap_or(1.1),
                 TimerMode::Once,
             ),
-            shot: Timer::from_seconds(3.0, TimerMode::Once),
+            shot: Timer::from_seconds(
+                std::env::var("BOOM_SHOT_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0),
+                TimerMode::Once,
+            ),
             shot_index: 0,
             right_clicks: 0,
         }

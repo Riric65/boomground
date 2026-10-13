@@ -285,7 +285,14 @@ pub fn text_fields(
                         if ctrl {
                             continue;
                         }
-                        if let Some(text) = ev.text.as_ref() {
+                        // Android : le clavier virtuel ne remplit pas toujours
+                        // `text`, seulement la touche logique.
+                        let typed = ev.text.clone().or_else(|| match &ev.logical_key {
+                            Key::Character(c) => Some(c.clone()),
+                            Key::Space => Some(" ".into()),
+                            _ => None,
+                        });
+                        if let Some(text) = typed.as_ref() {
                             for c in text.chars() {
                                 if !c.is_control() && field.value.chars().count() < field.max {
                                     field.value.push(c);
@@ -465,6 +472,28 @@ pub fn update_toasts(
         }
         if toast.life <= 0.0 {
             commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Téléphone : ouvre le clavier virtuel quand un champ (ou le chat) a le
+/// focus, et le referme ensuite.
+pub fn soft_keyboard(
+    fields: Query<&TextField>,
+    game: Res<crate::game::GameState>,
+    mut shown: Local<bool>,
+) {
+    let want = game.typing || fields.iter().any(|f| f.focused);
+    if want == *shown {
+        return;
+    }
+    *shown = want;
+    #[cfg(target_os = "android")]
+    if let Some(app) = bevy::android::ANDROID_APP.get() {
+        if want {
+            app.show_soft_input(true);
+        } else {
+            app.hide_soft_input(true);
         }
     }
 }
