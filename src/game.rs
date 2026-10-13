@@ -464,6 +464,9 @@ pub struct GameState {
     pub world_name: String,
     /// Chargement de la ville en cours (écran de chargement).
     pub loading: bool,
+    /// Démarrage du jeu : écran de chargement tant que le décor du menu
+    /// n'est pas prêt.
+    pub booting: bool,
     pub loading_progress: f32,
     /// Partie multijoueur en cours (le monde continue pendant la pause).
     pub multi: bool,
@@ -500,6 +503,7 @@ impl Default for GameState {
             teleport_to: None,
             world_name: String::new(),
             loading: false,
+            booting: true,
             loading_progress: 0.0,
             multi: false,
             fly_allowed: true,

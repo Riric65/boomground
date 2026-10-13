@@ -125,6 +125,24 @@ pub struct ModeCard(Mode);
 pub struct LobbyModeButton(Mode);
 #[derive(Component)]
 pub struct OnlyWhenStarted;
+
+/// Visible seulement en partie solo : sur un serveur, la sauvegarde
+/// appartient à l'hébergeur.
+#[derive(Component)]
+pub struct SoloOnly;
+
+pub fn solo_only(
+    game: Res<GameState>,
+    lobby: Res<crate::net::client::Lobby>,
+    mut nodes: Query<&mut Node, With<SoloOnly>>,
+) {
+    let d = if game.started && lobby.solo { Display::Flex } else { Display::None };
+    for mut n in &mut nodes {
+        if n.display != d {
+            n.display = d;
+        }
+    }
+}
 #[derive(Component)]
 pub struct SeedField;
 #[derive(Component)]
@@ -418,7 +436,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                 ))
                 .with_child(ui::label(&font, "REPRENDRE", 22.0, ui::ACCENT_DARK));
                 side.spawn((
-                    OnlyWhenStarted,
+                    SoloOnly,
                     MenuAction::SaveWorld,
                     ui::button_with(
                         Node {

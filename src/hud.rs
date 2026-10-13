@@ -202,7 +202,8 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 row_gap: px(18.0),
-                display: Display::None,
+                // Visible dès la première image (démarrage du jeu).
+                display: Display::Flex,
                 ..default()
             },
             BackgroundColor(Color::srgb(0.03, 0.035, 0.05)),
@@ -668,8 +669,20 @@ pub fn loading_screen(
     mut text: Query<&mut Text, With<LoadingText>>,
     mut initial: Local<usize>,
     mut calm: Local<f32>,
+    mut boot: Local<(f32, usize)>,
 ) {
-    if game.loading {
+    if game.booting {
+        // Démarrage : maillage du décor du menu et compilation des shaders.
+        boot.0 += time.delta_secs();
+        let pending = chunks.pending_all + if chunks.scanned { 0 } else { 10_000 };
+        boot.1 = boot.1.max(pending);
+        let done = if boot.1 == 0 { 0.0 } else { 1.0 - pending as f32 / boot.1 as f32 };
+        game.loading_progress = done.clamp(0.0, 1.0);
+        if (pending == 0 && boot.0 > 0.6) || boot.0 > 20.0 {
+            game.booting = false;
+            game.loading_progress = 0.0;
+        }
+    } else if game.loading {
         // Tout ce qui est dans la distance d'affichage doit être maillé.
         let pending = chunks.pending_all + if chunks.scanned { 0 } else { 10_000 };
         let stage_gen = loading.installed_at.is_none();
@@ -705,7 +718,7 @@ pub fn loading_screen(
         }
     }
     for mut n in &mut root {
-        let d = if game.loading { Display::Flex } else { Display::None };
+        let d = if game.loading || game.booting { Display::Flex } else { Display::None };
         if n.display != d {
             n.display = d;
         }
@@ -717,7 +730,9 @@ pub fn loading_screen(
         }
     }
     for mut t in &mut text {
-        let s = if loading.installed_at.is_none() {
+        let s = if game.booting {
+            "Chargement…"
+        } else if loading.installed_at.is_none() {
             "Génération de la ville…"
         } else {
             "Chargement du terrain…"

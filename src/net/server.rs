@@ -1455,10 +1455,38 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
             let s = &mut *server;
             s.sim.step(&mut s.world, dt, &mut ev);
         }
+        // Morceaux figés dans le monde : s'ils ne tiennent à rien (posés sur
+        // un gravat ou un corps parti depuis), ils retombent tout de suite au
+        // lieu de flotter jusqu'à la prochaine explosion voisine.
+        let placed: Vec<IVec3> = ev
+            .iter()
+            .filter_map(|e| match e {
+                SimEvent::WorldPlaced(cells) => Some(cells),
+                _ => None,
+            })
+            .flatten()
+            .map(|c| IVec3::new(c[0] as i32, c[1] as i32, c[2] as i32))
+            .collect();
         server.events.append(&mut ev);
-        if server.unsupported_for > 0.0 {
-            server.unsupported_for -= dt;
-            if now.duration_since(server.last_unsupported).as_secs_f32() > 0.25 {
+        if !placed.is_empty() && server.config.rules.gravity_collapse {
+            let comps = server.world.collapse_components(&placed);
+            if !comps.is_empty() {
+                let all: Vec<IVec3> = comps.iter().flatten().copied().collect();
+                broadcast_removed(&mut server, &all);
+                let mut ev = Vec::new();
+                {
+                    let s = &mut *server;
+                    s.sim.form_bodies(&s.world, comps, &mut ev);
+                }
+                server.events.append(&mut ev);
+            }
+        }
+        // Gravats sans appui : vérifiés en continu (4 fois par seconde juste
+        // après une destruction, une fois par seconde sinon).
+        server.unsupported_for = (server.unsupported_for - dt).max(0.0);
+        let every = if server.unsupported_for > 0.0 { 0.25 } else { 1.0 };
+        {
+            if now.duration_since(server.last_unsupported).as_secs_f32() > every {
                 server.last_unsupported = now;
                 let s = &mut *server;
                 s.sim.wake_unsupported(&s.world);

@@ -217,6 +217,7 @@ pub fn run() {
                 menu::solo_pause,
                 menu::server_list_ui,
                 menu::map_size_highlight,
+                menu::solo_only,
                 window_icon.run_if(desktop),
                 touch::clear.run_if(touch::on_touch),
                 ui::soft_keyboard.run_if(touch::on_touch),

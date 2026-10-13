@@ -2,4 +2,6 @@
 <resources>
     <!-- Même bleu nuit que le fond du menu du jeu (src/ui.rs). -->
     <color name="ic_launcher_background">#090B11</color>
+    <!-- Fond du démarrage = fond de l écran de chargement du jeu. -->
+    <color name="boot_bg">#08090D</color>
 </resources>
