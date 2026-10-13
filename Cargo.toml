@@ -58,3 +58,9 @@ inherits = "release"
 opt-level = "s"
 # LTO « thin » : le « fat » dépasse la mémoire d'une machine modeste.
 lto = "thin"
+
+# wgpu-hal corrigé : sur certains pilotes Vulkan mobiles (Mali), l'allocation
+# d'un descripteur échoue « pool plein » et wgpu paniquait. Voir
+# vendor/wgpu-hal/src/vulkan/descriptor.rs.
+[patch.crates-io]
+wgpu-hal = { path = "vendor/wgpu-hal" }
