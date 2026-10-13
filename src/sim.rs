@@ -706,31 +706,39 @@ impl Sim {
     /// Vent tourbillonnant (tornade) : aspire, fait tourner et soulève les
     /// gravats et les corps autour de `center` (au sol), dans `radius`.
     pub fn apply_wind(&mut self, center: Vec3, radius: f32, dt: f32) {
-        let force = |p: Vec3| -> Option<Vec3> {
+        // Vitesse visée en un point : rotation autour de l'axe sur un anneau
+        // qui s'élargit avec la hauteur, aspiration vers cet anneau, montée,
+        // puis éjection vers l'extérieur au sommet (~35 m).
+        let target = |p: Vec3| -> Option<(Vec3, f32)> {
             let d = Vec3::new(p.x - center.x, 0.0, p.z - center.z);
             let dist = d.length();
-            if dist > radius || p.y > center.y + 40.0 {
+            let h = (p.y - center.y).max(0.0);
+            let ring = radius * (0.35 + h / 35.0);
+            if dist > radius * (1.2 + h / 20.0) || h > 45.0 {
                 return None;
             }
-            let f = 1.0 - dist / radius;
-            let out = d / dist.max(0.3);
+            let out = if dist > 0.01 { d / dist } else { Vec3::X };
             let tangent = Vec3::new(-out.z, 0.0, out.x);
-            Some((tangent * 22.0 - out * 9.0 + Vec3::Y * (26.0 + 10.0 * f)) * f)
+            let grip = (1.0 - dist / (radius * (1.2 + h / 20.0))).clamp(0.2, 1.0);
+            let lift = if h < 35.0 { 9.0 + 6.0 * grip } else { -2.0 };
+            let fling = if h > 30.0 { 14.0 } else { 0.0 };
+            let v = tangent * (18.0 + 10.0 * grip) + out * ((ring - dist) * 2.5 + fling) + Vec3::Y * lift;
+            Some((v, grip))
         };
         for b in &mut self.blocks {
-            if let Some(a) = force(b.pos) {
+            if let Some((v, grip)) = target(b.pos) {
                 b.sleeping = false;
                 b.rest = 0.0;
-                b.vel += a * dt;
-                b.vel = b.vel.clamp_length_max(35.0);
-                b.spin += 6.0 * dt;
+                b.vel += (v - b.vel) * (dt * 3.0 * grip).min(1.0);
+                b.spin += 8.0 * dt;
             }
         }
         for body in &mut self.bodies {
-            if let Some(a) = force(body.pos) {
-                // Les gros corps résistent (ils pèsent plus lourd).
-                let k = (40.0 / body.mass.max(1.0)).clamp(0.05, 1.0);
-                body.lin += a * dt * k;
+            if let Some((v, grip)) = target(body.pos) {
+                // Les gros corps résistent : ils pèsent plus lourd.
+                let k = (40.0 / body.mass.max(1.0)).clamp(0.04, 1.0);
+                body.lin += (v - body.lin) * (dt * 2.0 * grip * k).min(1.0);
+                body.ang += Vec3::Y * dt * grip * k;
                 body.rest = 0.0;
             }
         }

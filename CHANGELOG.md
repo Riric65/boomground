@@ -9,10 +9,16 @@
   l'hôte dans le menu pause, commandes `tornado`, `tsunami`, `rain`, `drain`.
 - **Explosions** : débris projetés selon la puissance (jusque sur les bâtiments voisins),
   plus nombreux et dangereux, étincelles, onde de choc, champignon de fumée.
-- **Sol profond** (12 m : roche et terre) et **bunkers** sous les parcs et parkings.
-- **Chargement** : détail des étapes (génération, morceaux maillés, modifications reçues).
+- **Sol profond** (12 m : roche et terre) et **bunkers** sous les parcs et parkings
+  (entrée : escalier bordé de murets, balisé par deux lampes).
+- **Chargement** : détail des étapes (génération, morceaux maillés, modifications reçues),
+  barre qui ne recule plus.
+- **Véhicules** : vue du conducteur par défaut (C : vue de poursuite).
+- **Rendu** : plus de murs invisibles quand ils tombaient sur une frontière de morceaux
+  (bug apparu avec le chargement progressif).
 - **Performances** : maillage du terrain sur tous les cœurs (plus de délai après une
-  grosse explosion), morceaux d'un seul matériau compressés.
+  grosse explosion), morceaux d'un seul matériau compressés, ombres plus légères
+  (3 cascades sur 110 m, carte de 3072).
 - **Corrections** : roues à leur place, caméra qui ne saute plus au contact d'une voiture,
   débris qui ne se téléportent plus, portes qui ne se ferment plus sur un joueur (et plus
   d'éjection sur le toit), débris figés qui ne coincent plus les joueurs (ni l'anti-triche),

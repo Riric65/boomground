@@ -255,11 +255,13 @@ fn setup_scene(mut commands: Commands) {
             shadow_maps_enabled: true,
             ..default()
         },
-        // Ombres nettes de près, jusqu'à 140 m (la carte fait 153 m).
+        // Ombres nettes de près, jusqu'à 110 m. Trois cascades au lieu de
+        // quatre : chaque cascade redessine toute la géométrie proche, c'était
+        // le premier poste de dépense en qualité Ultra.
         CascadeShadowConfigBuilder {
-            num_cascades: 4,
-            first_cascade_far_bound: 14.0,
-            maximum_distance: 140.0,
+            num_cascades: 3,
+            first_cascade_far_bound: 16.0,
+            maximum_distance: 110.0,
             ..default()
         }
         .build(),

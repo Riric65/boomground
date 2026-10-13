@@ -101,6 +101,8 @@ pub fn camera(
     mut player: Query<(&mut Transform, &mut Body), With<Player>>,
     mut head: Query<&mut Transform, (With<Head>, Without<Player>)>,
     mut smooth: Local<Option<Vec3>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut third: Local<bool>,
 ) {
     let _ = lobby;
     if game.driving == 0 {
@@ -126,6 +128,20 @@ pub fn camera(
     pt.translation = b.pos - Vec3::Y * 0.6;
     body.vel = Vec3::ZERO;
 
+    // C : vue de poursuite / vue du conducteur (par défaut).
+    if keys.just_pressed(KeyCode::KeyC) && !game.typing {
+        *third = !*third;
+    }
+    if !*third {
+        // Première personne : yeux au siège du conducteur (à gauche, un peu
+        // en avant), regard dans l'axe de la voiture, légèrement vers le bas.
+        let eye = b.pos + b.rot * Vec3::new(-0.35, 0.75, 0.1);
+        *smooth = Some(eye);
+        let rot_inv = pt.rotation.inverse();
+        h.translation = rot_inv * (eye - pt.translation);
+        h.rotation = rot_inv * b.rot * Quat::from_rotation_x(-0.08);
+        return;
+    }
     let fwd = b.rot * Vec3::NEG_Z;
     let fwd_h = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
     let target = b.pos + Vec3::Y * 1.2;

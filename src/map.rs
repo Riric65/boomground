@@ -902,6 +902,9 @@ fn bunker(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3) {
     }
     // Muret au fond de la trémie, côté bunker.
     w.fill(IVec3::new(cx + hw + 1, g, cz - 2), IVec3::new(cx + hw + 2, g + 1, cz + 3), CONCRETE_DARK);
+    // Balises lumineuses au bout des murets : on repère l'entrée de loin.
+    w.set(IVec3::new(cx + hw + 1, g + 1, cz - 2), true, LAMP);
+    w.set(IVec3::new(cx + hw + 1, g + 1, cz + 2), true, LAMP);
 }
 
 fn park(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3) {

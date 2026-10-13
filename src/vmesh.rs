@@ -39,6 +39,10 @@ struct ChunkPair {
 #[derive(Resource, Default)]
 pub struct ChunkEntities {
     map: HashMap<IVec3, ChunkPair>,
+    /// Morceaux maillés sans aucune face visible (terre pleine, air) : ils
+    /// comptent comme faits. Sans ça, le balayage les remettait en file
+    /// toutes les 0,4 s et la barre de chargement reculait en boucle.
+    empty: std::collections::HashSet<IVec3>,
     /// Morceaux proches (≤ 70 m) pas encore maillés : sert à l'écran de
     /// chargement.
     pub pending_near: usize,
@@ -51,7 +55,7 @@ pub struct ChunkEntities {
 impl ChunkEntities {
     /// Morceaux de terrain affichés (maillés).
     pub fn meshed(&self) -> usize {
-        self.map.len()
+        self.map.len() + self.empty.len()
     }
 }
 
@@ -429,6 +433,7 @@ pub fn refresh_chunks(
             commands.entity(entity).despawn();
         }
         chunks.map.clear();
+        chunks.empty.clear();
         world.full_rebuild = false;
         world.dirty_chunks_mut().clear();
         *scan_timer = 0.0;
@@ -463,15 +468,25 @@ pub fn refresh_chunks(
                 for y in 0..grid.y {
                     let k = IVec3::new(x, y, z);
                     if far {
+                        chunks.empty.remove(&k);
                         if chunks.map.contains_key(&k) {
                             unload.push(k);
                         }
                         continue;
                     }
                     let d = center_of(k).distance(eye);
-                    let present = chunks.map.contains_key(&k);
+                    let present = chunks.map.contains_key(&k) || chunks.empty.contains(&k);
                     if d <= radius + half_diag {
-                        if !present && world.chunk_allocated(k) {
+                        // Un morceau d'air pur doit aussi être maillé si un voisin
+                        // côté +X/+Y/+Z est plein : les faces posées sur la
+                        // frontière appartiennent au morceau du côté -X/-Y/-Z.
+                        // Sans ça, un mur aligné sur une frontière restait
+                        // invisible (verre, métal… quel que soit le matériau).
+                        let needed = world.chunk_allocated(k)
+                            || world.chunk_allocated(k + IVec3::X)
+                            || world.chunk_allocated(k + IVec3::Y)
+                            || world.chunk_allocated(k + IVec3::Z);
+                        if !present && needed {
                             world.dirty_chunks_mut().insert(k);
                         }
                     } else if present && d > radius + 90.0 + half_diag {
@@ -557,7 +572,9 @@ pub fn refresh_chunks(
             apply(&mut pair.lamp, lamp, 2, &mut commands, &mut meshes, &mut existing, &assets);
             if pair.opaque.is_none() && pair.glass.is_none() && pair.lamp.is_none() {
                 chunks.map.remove(&key);
+                chunks.empty.insert(key);
             } else {
+                chunks.empty.remove(&key);
                 chunks.map.insert(key, pair);
             }
         }
@@ -570,6 +587,57 @@ mod tests {
     use super::*;
     use crate::world::VoxelWorld;
     use bevy::mesh::VertexAttributeValues;
+
+    #[test]
+    fn wall_on_chunk_border_is_meshed_by_the_air_chunk() {
+        // Mur à x = CHUNK, morceau 0 entièrement vide : sa face -X appartient
+        // au morceau 0, qui doit donc être maillé bien qu'il ne contienne rien.
+        let mut world = VoxelWorld::new();
+        world.fill(IVec3::new(CHUNK, 2, 2), IVec3::new(CHUNK + 1, 6, 6), mat::METAL);
+        assert!(!world.chunk_allocated(IVec3::ZERO));
+        assert!(world.chunk_allocated(IVec3::X));
+        assert!(build_pass(&world, IVec3::ZERO, 0).count_vertices() > 0, "face -X du mur");
+    }
+
+    #[test]
+    fn every_chunk_with_visible_glass_has_a_glass_mesh() {
+        let mut w = VoxelWorld::with_blocks(6);
+        w.rebuild(929519);
+        let n = w.dims / CHUNK;
+        let mut missing = 0;
+        let mut with_glass = 0;
+        for x in 0..n.x {
+            for y in 0..n.y {
+                for z in 0..n.z {
+                    let k = IVec3::new(x, y, z);
+                    let c0 = k * CHUNK;
+                    // Du verre qui touche l'air dans ce morceau ?
+                    let mut exposed = false;
+                    'scan: for cx in 0..CHUNK {
+                        for cy in 0..CHUNK {
+                            for cz in 0..CHUNK {
+                                let c = c0 + IVec3::new(cx, cy, cz);
+                                if w.is_solid(c) && w.material(c) == mat::GLASS
+                                    && [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z].iter().any(|o| !w.is_solid(c + *o))
+                                {
+                                    exposed = true;
+                                    break 'scan;
+                                }
+                            }
+                        }
+                    }
+                    if exposed {
+                        with_glass += 1;
+                        if build_pass(&w, c0, 1).count_vertices() == 0 {
+                            missing += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(with_glass > 20);
+        assert_eq!(missing, 0, "morceaux avec du verre visible mais sans maillage : {missing}/{with_glass}");
+    }
 
     #[test]
     fn slab_is_fused_into_six_quads_at_grid_corner() {

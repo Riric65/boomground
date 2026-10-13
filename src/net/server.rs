@@ -3247,7 +3247,7 @@ fn nature_tick(server: &mut ServerState, dt: f32) {
     }
 
     server.water_timer += dt;
-    if server.water_timer < 0.1 {
+    if server.water_timer < 0.05 {
         return;
     }
     let step = server.water_timer;
@@ -3347,7 +3347,7 @@ fn nature_tick(server: &mut ServerState, dt: f32) {
         if !cells.is_empty() {
             destroy_cells(server, cells, pos, Vec3::Y * 12.0);
         }
-        server.sim.apply_wind(pos, radius * 2.2, step);
+        server.sim.apply_wind(pos, radius * 1.8, step);
         // Joueurs : aspirés, soulevés, projetés.
         let ids: Vec<u16> = server.clients.keys().copied().collect();
         for id in ids {
@@ -3360,7 +3360,10 @@ fn nature_tick(server: &mut ServerState, dt: f32) {
             let f = 1.0 - dist / (radius * 2.2);
             let out = d / dist.max(0.3);
             let tangent = Vec3::new(-out.z, 0.0, out.x);
-            let dv = (tangent * 16.0 - out * 6.0 + Vec3::Y * 14.0) * f * step;
+            // Même courant que pour les débris : on tourne autour, aspiré
+            // vers l'anneau, soulevé (plus fort près du cœur).
+            let ring = radius * 0.5;
+            let dv = (tangent * 14.0 + out * (ring - dist) * 1.5 + Vec3::Y * (10.0 + 8.0 * f)) * f * step;
             if let Some(c) = server.clients.get_mut(&id) {
                 c.grace_until = Instant::now() + Duration::from_secs(4);
             }

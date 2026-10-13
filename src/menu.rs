@@ -1968,7 +1968,7 @@ pub fn settings_panel(
             sun.shadow_maps_enabled = settings.shadows > 0;
         }
     }
-    let size = if settings.shadows >= 2 { 4096 } else { 2048 };
+    let size = if settings.shadows >= 2 { 3072 } else { 2048 };
     if shadow_map.size != size {
         shadow_map.size = size;
     }

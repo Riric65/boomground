@@ -73,6 +73,20 @@ pub fn pose(
         return;
     }
     *frames += 1;
+    // `BOOM_LIFT=30` : vol libre à 30 m au-dessus du sol après le
+    // chargement, regard vers le bas (`BOOM_PITCH`, radians).
+    if !game.loading {
+        if let Some(lift) = std::env::var("BOOM_LIFT").ok().and_then(|v| v.parse::<f32>().ok()) {
+            if let Ok((mut t, mut body)) = player.single_mut() {
+                if !body.fly {
+                    body.fly = true;
+                    t.translation.y += lift;
+                }
+                body.vel = Vec3::ZERO;
+                body.pitch = std::env::var("BOOM_PITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(-0.5);
+            }
+        }
+    }
     if *frames != 3 {
         return;
     }

@@ -165,16 +165,49 @@ impl Water {
                 continue;
             }
             let mut lvl = lvl;
-            // 1. Chute.
-            let below = c - IVec3::Y;
-            if below.y >= 1 && !world.is_solid(below) {
-                let lb = self.level(below);
-                if lb < FULL {
-                    let moved = lvl.min(FULL - lb);
-                    self.touch(below); self.cells.insert(below, lb + moved);
-                    lvl -= moved;
-                    self.wake(below);
+            // 1. Chute : jusqu'à 4 cellules d'un coup dans le vide (l'eau
+            // tombait d'une cellule par pas, une cascade semblait au ralenti).
+            let mut cur = c;
+            for _ in 0..4 {
+                if lvl == 0 {
+                    break;
                 }
+                let below = cur - IVec3::Y;
+                if below.y < 1 || world.is_solid(below) {
+                    break;
+                }
+                let lb = self.level(below);
+                if lb >= FULL {
+                    break;
+                }
+                let moved = lvl.min(FULL - lb);
+                self.touch(below);
+                self.cells.insert(below, lb + moved);
+                lvl -= moved;
+                self.wake(below);
+                if lb + moved < FULL && lb == 0 {
+                    // Cellule libre traversée : on continue de tomber depuis
+                    // elle avec ce qu'on vient d'y mettre.
+                    let carried = self.cells.remove(&below).unwrap_or(0);
+                    lvl += carried;
+                    cur = below;
+                    if lvl > 0 && (below - IVec3::Y).y >= 1 && !world.is_solid(below - IVec3::Y) {
+                        continue;
+                    }
+                    self.cells.insert(below, lvl);
+                    lvl = 0;
+                    break;
+                }
+                break;
+            }
+            // Quatre cellules de chute libre : l'eau transportée reste là où
+            // elle est arrivée (elle continuera au pas suivant).
+            if cur != c && lvl > 0 {
+                let l = self.level(cur);
+                self.touch(cur);
+                self.cells.insert(cur, (l + lvl).min(FULL));
+                self.wake(cur);
+                lvl = 0;
             }
             // 2. Étalement : on donne aux voisines plus basses, dans un ordre
             // tiré au sort (sinon l'eau glisse toujours du même côté).
