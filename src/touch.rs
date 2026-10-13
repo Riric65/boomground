@@ -158,6 +158,9 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
         ))
         .with_children(|root| {
             // --- Joystick : zone de gauche ou de droite ---
+            // --- Regard : tout l'écran, derrière le joystick et les boutons ---
+            root.spawn((LookZone, zone(100.0)));
+
             // Joystick : seulement le bas de l'écran, du côté choisi (le
             // haut reste au regard et aux boutons).
             root.spawn((MoveZone, zone(45.0))).insert(Node {
@@ -167,8 +170,6 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 bottom: px(0.0),
                 ..default()
             });
-            // --- Regard : tout le reste de l'écran ---
-            root.spawn((LookZone, zone(55.0)));
 
             // Joystick : posé là où le doigt touche la zone de déplacement
             // (enfant de la racine plein écran, donc en coordonnées écran).
@@ -284,7 +285,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
             root.spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    top: px(90.0),
+                    top: px(110.0),
                     left: px(12.0),
                     flex_direction: FlexDirection::Column,
                     row_gap: px(8.0),

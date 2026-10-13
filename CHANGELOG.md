@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.6.0
+
+- **Multijoueur** : plus de blocage sur « Chargement du terrain » en rejoignant un serveur
+  actif (les modifications envoyées en continu remettaient le compteur à zéro).
+- **Mobile** : un doigt par rôle (joystick dans le bas de l'écran, regard partout ailleurs,
+  boutons fonctionnels dont TIR), clavier virtuel pour le chat et les champs, boutons chat
+  et pause (et touche Retour), paysage forcé, interface adaptée.
+- **Voitures** : vraies roues (suspension, adhérence, braquage des roues avant, rotation).
+- **Langues** : français, anglais, espagnol, allemand (Paramètres → Langue).
+- **Écran de chargement** dès le lancement, sur PC comme sur mobile.
+- **Physique** : les morceaux qui se figent sans appui retombent au lieu de flotter.
+- **Sauvegarde** du monde réservée au solo.
+- **Sécurité** : lecture réseau bornée par client (plus d'inondation possible), découpage
+  des trames en temps linéaire.
+- **Android** : correctif de wgpu pour les pilotes Mali (plantage « pool plein »), erreurs
+  GPU non fatales, dernier plantage affiché au menu.
+
+## 1.5.5
+
+- Correctifs : MSAA 2× (plantage llvmpipe), pseudos au-dessus des joueurs, anti-triche
+  moins sévère, spawn aléatoire sur un trottoir, montée des marches, première version
+  Android.
+
 ## 1.5.0
 
 - **Armes** : 76 outils (4× plus) rangés en 6 catégories (touches 1–6), boutique par

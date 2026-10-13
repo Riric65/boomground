@@ -281,7 +281,10 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
             Node {
                 position_type: PositionType::Absolute,
                 right: px(20),
-                bottom: px(104),
+                // Téléphone : en haut à droite, sous les boutons chat et
+                // pause (le bas est pris par les boutons tactiles).
+                bottom: if crate::touch::is_touch_platform() { Val::Auto } else { px(104) },
+                top: if crate::touch::is_touch_platform() { px(80) } else { Val::Auto },
                 ..default()
             },
         ))
