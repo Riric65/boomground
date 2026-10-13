@@ -698,8 +698,10 @@ pub fn receive(
                 }
             }
             Packet::Hurt { hp, from } => {
+                // La secousse est gérée par `vitals::feedback`, à la mesure
+                // des points perdus (avant : une forte secousse fixe à chaque
+                // petit dégât, la caméra sautait au contact d'une voiture).
                 d.game.hp = hp as f32;
-                d.shake.add(0.5);
                 let _ = from;
             }
             Packet::Died { id, at, push } => {

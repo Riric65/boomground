@@ -399,30 +399,6 @@ fn apply(
     }
 }
 
-fn rebuild_chunk(
-    key: IVec3,
-    world: &VoxelWorld,
-    chunks: &mut ChunkEntities,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    existing: &mut Query<&mut Mesh3d, With<VoxelMesh>>,
-    assets: &VoxelAssets,
-) {
-    let corner = key * CHUNK;
-    let mut pair = chunks.map.get(&key).copied().unwrap_or_default();
-    let opaque_mesh = build_pass(world, corner, 0);
-    apply(&mut pair.opaque, opaque_mesh, 0, commands, meshes, existing, assets);
-    let glass_mesh = build_pass(world, corner, 1);
-    apply(&mut pair.glass, glass_mesh, 1, commands, meshes, existing, assets);
-    let lamp_mesh = build_pass(world, corner, 2);
-    apply(&mut pair.lamp, lamp_mesh, 2, commands, meshes, existing, assets);
-    if pair.opaque.is_none() && pair.glass.is_none() && pair.lamp.is_none() {
-        chunks.map.remove(&key);
-    } else {
-        chunks.map.insert(key, pair);
-    }
-}
-
 /// Reconstruit les morceaux touchés (budget par frame) et charge / décharge
 /// les maillages selon la distance à la caméra : seuls les morceaux à portée
 /// d'affichage existent en mémoire.
@@ -537,14 +513,46 @@ pub fn refresh_chunks(
     let budget = std::time::Duration::from_micros(if game.loading { 45_000 } else { 4_000 });
     let started = std::time::Instant::now();
     let n = world.dims / CHUNK;
-    for key in keys {
-        // Au moins un morceau par image, puis on respecte le budget.
-        world.dirty_chunks_mut().remove(&key);
-        if !(key.cmplt(IVec3::ZERO).any() || key.cmpge(n).any()) {
-            rebuild_chunk(key, &world, &mut chunks, &mut commands, &mut meshes, &mut existing, &assets);
+    // Maillage en parallèle sur tous les cœurs, par lots : une grosse
+    // explosion salit des dizaines de morceaux, qui se reconstruisaient un à
+    // un sur un seul cœur (délai visible, processeur à peine occupé).
+    let threads = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 8);
+    let mut keys = keys.into_iter().filter(|k| !(k.cmplt(IVec3::ZERO).any() || k.cmpge(n).any())).collect::<Vec<_>>();
+    let mut first = true;
+    while !keys.is_empty() && (first || started.elapsed() < budget) {
+        first = false;
+        let batch: Vec<IVec3> = keys.drain(..keys.len().min(threads * 2)).collect();
+        for k in &batch {
+            world.dirty_chunks_mut().remove(k);
         }
-        if started.elapsed() > budget {
-            break;
+        let w: &VoxelWorld = &world;
+        let per = batch.len().div_ceil(threads).max(1);
+        let built: Vec<(IVec3, [Mesh; 3])> = std::thread::scope(|scope| {
+            let jobs: Vec<_> = batch
+                .chunks(per)
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter()
+                            .map(|&k| {
+                                let c = k * CHUNK;
+                                (k, [build_pass(w, c, 0), build_pass(w, c, 1), build_pass(w, c, 2)])
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            jobs.into_iter().flat_map(|j| j.join().unwrap_or_default()).collect()
+        });
+        for (key, [opaque, glass, lamp]) in built {
+            let mut pair = chunks.map.get(&key).copied().unwrap_or_default();
+            apply(&mut pair.opaque, opaque, 0, &mut commands, &mut meshes, &mut existing, &assets);
+            apply(&mut pair.glass, glass, 1, &mut commands, &mut meshes, &mut existing, &assets);
+            apply(&mut pair.lamp, lamp, 2, &mut commands, &mut meshes, &mut existing, &assets);
+            if pair.opaque.is_none() && pair.glass.is_none() && pair.lamp.is_none() {
+                chunks.map.remove(&key);
+            } else {
+                chunks.map.insert(key, pair);
+            }
         }
     }
     chunks.pending_all = world.dirty_chunks_mut().len();

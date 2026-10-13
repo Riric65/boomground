@@ -223,6 +223,7 @@ pub fn wheels(
     mut assets: Local<Option<(Handle<Mesh>, Handle<StandardMaterial>)>>,
     mut shown: Local<std::collections::HashMap<u32, [Entity; 4]>>,
     mut wheels: Query<(&WheelVis, &mut Transform)>,
+    net_bodies: Query<&NetBody>,
 ) {
     // Véhicules disparus : leurs roues partent avec le corps (enfants), on
     // oublie juste l'entrée.
@@ -251,7 +252,7 @@ pub fn wheels(
                     WheelVis { body: id, index },
                     Mesh3d(mesh.clone()),
                     MeshMaterial3d(mat.clone()),
-                    Transform::from_translation(centers[index]),
+                    Transform::from_translation(centers[index]).with_scale(Vec3::ZERO),
                     ChildOf(body),
                 ))
                 .id()
@@ -260,7 +261,15 @@ pub fn wheels(
     }
     for (w, mut t) in &mut wheels {
         let Some((centers, steer, spin)) = poses.0.get(&w.body) else { continue };
-        t.translation = centers[w.index];
+        // Le corps est placé par le coin de sa grille, les roues sont
+        // relatives au centre de masse : on ajoute ce décalage.
+        let com = mirror
+            .body_entity(w.body)
+            .and_then(|e| net_bodies.get(e).ok())
+            .map_or(Vec3::ZERO, |b| b.com);
+        t.translation = com + centers[w.index];
+        // Masquée à la création (position encore inconnue), visible ensuite.
+        t.scale = Vec3::ONE;
         // Axe du cylindre (Y) couché sur X, puis rotation de roulement et
         // braquage des roues avant.
         let steer = if w.index < 2 { *steer } else { 0.0 };

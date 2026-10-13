@@ -1937,6 +1937,39 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn bench_tsar() {
+        let mut w = VoxelWorld::new();
+        w.rebuild(4242);
+        let c = IVec3::new(w.dims.x / 2 + 20, 0, w.dims.z / 2 + 20);
+        let center = w.cell_center(c + IVec3::new(0, crate::map::GROUND + 12, 0));
+        let t = std::time::Instant::now();
+        let destroyed = w.carve(center, 14.0);
+        let t_carve = t.elapsed();
+        let t = std::time::Instant::now();
+        let comps = w.collapse_components(&destroyed);
+        let t_collapse = t.elapsed();
+        let n: usize = comps.iter().map(|c| c.len()).sum();
+        let mut sim = Sim::new();
+        let mut ev = Vec::new();
+        let t = std::time::Instant::now();
+        sim.add_rubble(&w, &destroyed, center, Vec3::ZERO);
+        let t_rubble = t.elapsed();
+        let t = std::time::Instant::now();
+        sim.form_bodies(&w, comps, &mut ev);
+        let t_form = t.elapsed();
+        let mut worst = std::time::Duration::ZERO;
+        let t = std::time::Instant::now();
+        for _ in 0..120 {
+            let s0 = std::time::Instant::now();
+            sim.step(&mut w, 1.0 / 60.0, &mut ev);
+            worst = worst.max(s0.elapsed());
+        }
+        eprintln!("détruits {} carve {:?} collapse {:?} ({} voxels, {} comps) rubble {:?} ({} blocs) form {:?} ({} corps) 120 pas {:?} pire {:?}",
+            destroyed.len(), t_carve, t_collapse, n, 0, t_rubble, sim.blocks.len(), t_form, sim.bodies.len(), t.elapsed(), worst);
+    }
+
+    #[test]
     fn vehicle_hits_pole_without_flying() {
         let mut w = flat_world();
         // Poteau fin (1 × 12) droit devant la voiture.

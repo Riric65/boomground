@@ -28,6 +28,9 @@ pub struct NetBody {
     pub target_rot: Quat,
     pub rot: Quat,
     pub pos: Vec3,
+    /// Aucune pose reçue encore : le corps est masqué, puis placé d'un coup
+    /// (avant, il partait de l'origine du monde et glissait jusqu'à sa place).
+    pub fresh: bool,
 }
 
 struct Partial {
@@ -42,6 +45,9 @@ pub struct Mirror {
     blocks: HashMap<u32, Entity>,
     bodies: HashMap<u32, Entity>,
     partial: HashMap<u32, Partial>,
+    /// Dernière pose connue de chaque corps (pour le recréer en place quand
+    /// sa forme change).
+    poses: HashMap<u32, (Vec3, Quat)>,
     /// Flammes affichées, par voxel.
     pub fires: HashMap<IVec3, Entity>,
 }
@@ -51,6 +57,7 @@ impl Mirror {
         for (_, e) in self.blocks.drain() {
             commands.entity(e).despawn();
         }
+        self.poses.clear();
         for (_, e) in self.bodies.drain() {
             commands.entity(e).despawn();
         }
@@ -151,26 +158,23 @@ impl Mirror {
         let dims3 = IVec3::new(dims[0] as i32, dims[1] as i32, dims[2] as i32);
         let Some(grid) = BodyGrid::decode_rle(dims3, &bytes) else { return };
 
-        let previous = self.bodies.remove(&id);
-        let (pos, rot) = match previous {
-            Some(old) => {
-                commands.entity(old).despawn();
-                (Vec3::ZERO, Quat::IDENTITY)
-            }
-            None => (Vec3::ZERO, Quat::IDENTITY),
-        };
-        let _ = (pos, rot);
+        if let Some(old) = self.bodies.remove(&id) {
+            commands.entity(old).despawn();
+        }
+        let known = self.poses.get(&id).copied();
+        let (pos, rot) = known.unwrap_or((Vec3::ZERO, Quat::IDENTITY));
         let parent = commands
             .spawn((
                 NetBody {
                     com,
-                    target_pos: Vec3::ZERO,
-                    target_rot: Quat::IDENTITY,
-                    rot: Quat::IDENTITY,
-                    pos: Vec3::ZERO,
+                    target_pos: pos,
+                    target_rot: rot,
+                    rot,
+                    pos,
+                    fresh: known.is_none(),
                 },
-                Transform::IDENTITY,
-                Visibility::default(),
+                Transform::from_translation(pos - rot * com).with_rotation(rot),
+                if known.is_some() { Visibility::Inherited } else { Visibility::Hidden },
             ))
             .id();
         let n = (dims3 + IVec3::splat(vmesh::CHUNK - 1)) / vmesh::CHUNK;
@@ -212,6 +216,11 @@ impl Mirror {
                 if let Ok(mut b) = q.get_mut(e) {
                     b.target_pos = *pos;
                     b.target_rot = Quat::from_array(*rot).normalize();
+                    self.poses.insert(*id, (b.target_pos, b.target_rot));
+                    if b.fresh {
+                        b.pos = b.target_pos;
+                        b.rot = b.target_rot;
+                    }
                 }
             }
         }
@@ -219,6 +228,7 @@ impl Mirror {
 
     pub fn remove_body(&mut self, commands: &mut Commands, id: u32) {
         self.partial.remove(&id);
+        self.poses.remove(&id);
         if let Some(e) = self.bodies.remove(&id) {
             commands.entity(e).despawn();
         }
@@ -229,7 +239,7 @@ impl Mirror {
 pub fn smooth(
     time: Res<Time>,
     mut blocks: Query<(&NetBlock, &mut Transform), Without<NetBody>>,
-    mut bodies: Query<(&mut NetBody, &mut Transform), Without<NetBlock>>,
+    mut bodies: Query<(&mut NetBody, &mut Transform, &mut Visibility), Without<NetBlock>>,
 ) {
     let k = 1.0 - (-time.delta_secs() * 22.0).exp();
     for (b, mut t) in &mut blocks {
@@ -238,7 +248,14 @@ pub fn smooth(
         }
         t.rotation = t.rotation.slerp(Quat::from_rotation_y(b.yaw), k);
     }
-    for (mut b, mut t) in &mut bodies {
+    for (mut b, mut t, mut vis) in &mut bodies {
+        if b.fresh {
+            if b.target_pos == Vec3::ZERO {
+                continue;
+            }
+            b.fresh = false;
+            *vis = Visibility::Inherited;
+        }
         b.pos = b.pos.lerp(b.target_pos, k);
         b.rot = b.rot.slerp(b.target_rot, k);
         t.rotation = b.rot;
