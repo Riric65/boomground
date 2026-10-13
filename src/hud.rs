@@ -48,6 +48,10 @@ pub struct LoadingBar;
 #[derive(Component)]
 pub struct LoadingText;
 
+/// Détail sous la barre de chargement (étape, compteurs).
+#[derive(Component)]
+pub struct LoadingDetail;
+
 /// Case de la barre d'armes.
 #[derive(Component)]
 pub struct HotbarSlot(WeaponId);
@@ -231,6 +235,7 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>) {
                 },
                 BackgroundColor(ui::ACCENT),
             ));
+            p.spawn((LoadingDetail, ui::text(&font, "", 15.0, ui::MUTED)));
         });
 
     // Points de vie (bas gauche).
@@ -669,7 +674,9 @@ pub fn loading_screen(
     chunks: Res<crate::vmesh::ChunkEntities>,
     mut root: Query<&mut Node, (With<LoadingRoot>, Without<LoadingBar>)>,
     mut bar: Query<&mut Node, (With<LoadingBar>, Without<LoadingRoot>)>,
-    mut text: Query<&mut Text, With<LoadingText>>,
+    mut text: Query<&mut Text, (With<LoadingText>, Without<LoadingDetail>)>,
+    mut detail: Query<&mut Text, (With<LoadingDetail>, Without<LoadingText>)>,
+    world: Res<crate::world::VoxelWorld>,
     mut initial: Local<usize>,
     mut calm: Local<f32>,
     mut boot: Local<(f32, usize)>,
@@ -742,6 +749,27 @@ pub fn loading_screen(
         });
         if t.0 != s {
             t.0 = s;
+        }
+    }
+    // Ligne de détail : étape réseau, compteurs de génération et de maillage.
+    let total = chunks.meshed() + chunks.pending_all;
+    let meshed = chunks.meshed();
+    let line = if game.booting {
+        crate::i18n::tf("Terrain : {} / {} morceaux", &[&meshed, &total.max(meshed)])
+    } else if !game.loading {
+        String::new()
+    } else if loading.installed_at.is_none() {
+        let secs = loading.started_at.map_or(0.0, |t| t.elapsed().as_secs_f32());
+        crate::i18n::tf("Connexion établie · génération de la ville (seed {}) · {} s", &[&game.seed, &format!("{secs:.1}")])
+    } else {
+        crate::i18n::tf(
+            "Terrain : {} / {} morceaux · {} voxels · {} modifications reçues",
+            &[&meshed, &total.max(meshed), &thousands(world.alive), &thousands(loading.edits.min(u32::MAX as usize) as u32)],
+        )
+    };
+    for mut t in &mut detail {
+        if t.0 != line {
+            t.0 = line.clone();
         }
     }
 }

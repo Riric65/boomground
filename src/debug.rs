@@ -262,7 +262,7 @@ pub fn autopilot(
             ALL_WEAPONS
                 .iter()
                 .copied()
-                .find(|w| format!("{w:?}").eq_ignore_ascii_case(name))
+                .find(|w| w.spec().key.eq_ignore_ascii_case(name) || format!("{w:?}").eq_ignore_ascii_case(name))
         });
         game.weapon = match wanted {
             Some(w) => w,

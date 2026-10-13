@@ -19,7 +19,7 @@ use crate::world::{density, mat, VoxelWorld, VOXEL};
 /// Gravité (m/s²) : celle de la Terre, pour des chutes crédibles.
 pub const GRAVITY: f32 = 9.81;
 /// Nombre maximal de blocs de gravats simultanés.
-pub const MAX_BLOCKS: usize = 900;
+pub const MAX_BLOCKS: usize = 1200;
 /// Nombre maximal de corps rigides simultanés.
 pub const MAX_BODIES: usize = 64;
 /// Points de collision par corps.
@@ -31,7 +31,7 @@ pub const MAX_BODY_VOXELS: usize = 450_000;
 /// Taille d'une zone de gravats (voxels).
 const ZONE: i32 = 2;
 /// Blocs créés au maximum par destruction.
-const MAX_PER_HIT: usize = 160;
+const MAX_PER_HIT: usize = 260;
 
 /// Générateur pseudo-aléatoire (xorshift64).
 #[derive(Clone)]
@@ -486,7 +486,15 @@ impl Sim {
         let away = (center - impact).normalize_or_zero();
         let strength = push.length().max(1.0);
         let light = (1.0 / (half.x * half.y * half.z * 8.0 * density(material)).max(0.4)).min(2.0);
-        let vel = (away * (1.0 + self.rng.f32() * 1.5) * strength.sqrt()
+        // Vitesse radiale proportionnelle à la puissance : une grenade
+        // éparpille autour d'elle, une Tsar projette des débris jusque sur
+        // les bâtiments voisins.
+        let radial = if strength > 6.0 {
+            strength * (0.55 + self.rng.f32() * 1.25)
+        } else {
+            (1.0 + self.rng.f32() * 1.5) * strength.sqrt()
+        };
+        let vel = (away * radial
             + push * (0.3 + self.rng.f32() * 0.4))
             * light.sqrt()
             + Vec3::new(self.rng.signed(), self.rng.f32() * 0.5, self.rng.signed()) * 1.2;
@@ -1504,7 +1512,10 @@ impl Sim {
     pub fn crush_at_except(&self, lo: Vec3, hi: Vec3, except: Option<u32>) -> Option<(f32, f32)> {
         let mut best: Option<(f32, f32)> = None;
         for b in &self.blocks {
-            if b.sleeping || b.mass < 0.7 || b.vel.length() < 4.0 {
+            // Gros morceau lent ou petit éclat très rapide : les deux
+            // blessent.
+            let speed = b.vel.length();
+            if b.sleeping || speed < 4.0 || (b.mass < 0.7 && speed < 9.0) || b.mass < 0.15 {
                 continue;
             }
             let (bmin, bmax) = (b.pos - b.half, b.pos + b.half);

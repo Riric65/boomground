@@ -289,6 +289,10 @@ pub struct WorldLoading {
     backlog: Vec<Packet>,
     /// Date d'installation de la carte (début du maillage).
     pub installed_at: Option<std::time::Instant>,
+    /// Voxels modifiés reçus du serveur pendant le chargement (affichage).
+    pub edits: usize,
+    /// Début de la génération de la ville (affichage).
+    pub started_at: Option<std::time::Instant>,
 }
 
 /// Ressources et requêtes supplémentaires de [`receive`] (Bevy limite à 16
@@ -405,6 +409,8 @@ pub fn receive(
                 });
                 loading.rx = Some(std::sync::Mutex::new(rx));
                 loading.installed_at = None;
+                loading.edits = 0;
+                loading.started_at = Some(std::time::Instant::now());
                 d.game.loading = true;
                 d.game.loading_progress = 0.0;
                 loading.backlog = queue.drain(..).collect();
@@ -433,6 +439,9 @@ pub fn receive(
                 lobby.started = true;
             }
             Packet::Voxels { cells, .. } => {
+                if d.game.loading {
+                    loading.edits += cells.len();
+                }
                 // Autorité du serveur : on applique (idempotent : un voxel
                 // déjà cassé en local est ignoré). Les gravats arrivent par
                 // `Blocks`.
@@ -680,6 +689,9 @@ pub fn receive(
                 d.effects(at, radius);
             }
             Packet::Placed { cells } => {
+                if d.game.loading {
+                    loading.edits += cells.len();
+                }
                 for c in cells {
                     let cell = IVec3::new(c[0] as i32, c[1] as i32, c[2] as i32);
                     if c[3] == 255 {

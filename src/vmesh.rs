@@ -48,6 +48,13 @@ pub struct ChunkEntities {
     pub scanned: bool,
 }
 
+impl ChunkEntities {
+    /// Morceaux de terrain affichés (maillés).
+    pub fn meshed(&self) -> usize {
+        self.map.len()
+    }
+}
+
 /// Attributs compacts : 24 octets par sommet au lieu de 48. Les identifiants
 /// et noms sont ceux des attributs standard, seul le format change.
 const NORMAL_S8: MeshVertexAttribute =

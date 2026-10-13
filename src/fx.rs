@@ -505,6 +505,10 @@ pub struct Fireball {
     size: f32,
     /// Vitesse de montée.
     rise: f32,
+    /// Vitesse propre (étincelles, onde de choc), freinée par l'air.
+    vel: Vec3,
+    /// Ne rétrécit pas en fin de vie (anneau d'onde de choc qui s'étale).
+    spread: bool,
 }
 
 #[derive(Resource)]
@@ -545,9 +549,12 @@ pub fn fireball(commands: &mut Commands, fire: &FireAssets, at: Vec3, radius: f3
         Transform::from_translation(at).with_scale(Vec3::splat(0.1)),
         Fireball {
             life: 0.0,
-            max: 0.3,
+            // Les grosses explosions brûlent plus longtemps.
+            max: 0.3 + (radius * 0.05).min(1.2),
             size: radius * 0.8,
-            rise: 0.5,
+            rise: 0.5 + radius * 0.08,
+            vel: Vec3::ZERO,
+            spread: false,
         },
         bevy::light::NotShadowCaster,
     ));
@@ -572,9 +579,76 @@ pub fn fireball(commands: &mut Commands, fire: &FireAssets, at: Vec3, radius: f3
                 max: 0.9 + rand() * 0.8,
                 size: radius * (0.14 + rand() * 0.14),
                 rise: 1.5 + rand() * 1.5,
+                vel: Vec3::ZERO,
+                spread: false,
             },
             bevy::light::NotShadowCaster,
         ));
+    }
+    if radius < 4.0 {
+        return;
+    }
+    // --- Grosses explosions ---
+    let big = (radius / 14.0).min(1.5);
+    // Étincelles et braises projetées dans toutes les directions.
+    for _ in 0..(10.0 + radius * 3.0) as u32 {
+        let a = rand() * std::f32::consts::TAU;
+        let up = 0.2 + rand() * 0.9;
+        let dir = Vec3::new(a.cos() * (1.0 - up * 0.5), up, a.sin() * (1.0 - up * 0.5)).normalize();
+        commands.spawn((
+            Mesh3d(fire.sphere.clone()),
+            MeshMaterial3d(fire.material.clone()),
+            Transform::from_translation(at).with_scale(Vec3::splat(0.05)),
+            Fireball {
+                life: 0.0,
+                max: 0.8 + rand() * 1.4,
+                size: 0.25 + rand() * 0.35 * big,
+                rise: -4.0,
+                vel: dir * radius * (1.2 + rand() * 1.8),
+                spread: false,
+            },
+            bevy::light::NotShadowCaster,
+        ));
+    }
+    // Onde de choc : anneau de poussière qui file au ras du sol.
+    for i in 0..(16.0 + radius * 2.0) as u32 {
+        let a = i as f32 / (16.0 + radius * 2.0) * std::f32::consts::TAU;
+        let dir = Vec3::new(a.cos(), 0.0, a.sin());
+        commands.spawn((
+            Mesh3d(fire.sphere.clone()),
+            MeshMaterial3d(fire.smoke.clone()),
+            Transform::from_translation(at + dir * radius * 0.4).with_scale(Vec3::splat(0.05)),
+            Fireball {
+                life: 0.0,
+                max: 1.2 + rand() * 0.6,
+                size: radius * 0.18,
+                rise: 0.3,
+                vel: dir * radius * 3.2,
+                spread: true,
+            },
+            bevy::light::NotShadowCaster,
+        ));
+    }
+    // Champignon : colonne de fumée qui monte haut et reste longtemps.
+    if radius >= 8.0 {
+        for i in 0..(8.0 + radius) as u32 {
+            let h = i as f32 / (8.0 + radius);
+            let off = Vec3::new(rand() - 0.5, 0.0, rand() - 0.5) * radius * (0.3 + h * 0.9);
+            commands.spawn((
+                Mesh3d(fire.sphere.clone()),
+                MeshMaterial3d(fire.smoke.clone()),
+                Transform::from_translation(at + off).with_scale(Vec3::splat(0.05)),
+                Fireball {
+                    life: 0.0,
+                    max: 5.0 + rand() * 4.0,
+                    size: radius * (0.35 + h * 0.45),
+                    rise: radius * (0.6 + h * 1.4),
+                    vel: Vec3::ZERO,
+                    spread: true,
+                },
+                bevy::light::NotShadowCaster,
+            ));
+        }
     }
 }
 
@@ -590,8 +664,17 @@ pub fn update_fireballs(
         // Gonfle vite, puis se résorbe.
         let grow = 1.0 - (1.0 - t).powi(3);
         let shrink = if t > 0.6 { 1.0 - (t - 0.6) / 0.4 } else { 1.0 };
+        let shrink = if ball.spread { 1.0 - t * 0.3 } else { shrink };
         transform.scale = Vec3::splat((ball.size * grow * shrink).max(0.01));
         transform.translation.y += dt * ball.rise;
+        if ball.vel != Vec3::ZERO {
+            transform.translation += ball.vel * dt;
+            // Freinage de l'air ; les étincelles retombent (rise < 0).
+            ball.vel *= (-1.6 * dt).exp();
+            if ball.rise < 0.0 {
+                ball.vel.y -= 9.0 * dt;
+            }
+        }
         if ball.life >= ball.max {
             commands.entity(entity).despawn();
         }
@@ -719,7 +802,7 @@ pub fn dust(commands: &mut Commands, p: &ParticleAssets, density: u8, existing: 
         return;
     }
     let scale = if density == 1 { 0.5 } else { 1.0 };
-    let n = ((amount * 0.12).clamp(2.0, 16.0) * scale) as usize;
+    let n = ((amount * 0.12).clamp(2.0, 40.0) * scale) as usize;
     let seed = (at.x * 12.9898 + at.y * 78.233 + at.z * 37.719).sin() * 43758.547;
     let mut s = seed.fract().abs();
     let mut rnd = move || {
