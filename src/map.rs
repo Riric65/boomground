@@ -13,7 +13,7 @@ use crate::world::{VoxelWorld, VOXEL};
 
 /// Version du générateur : une sauvegarde d'une autre version est refusée
 /// (rejouer son historique sur une autre ville n'aurait aucun sens).
-pub const MAP_VERSION: u32 = 3;
+pub const MAP_VERSION: u32 = 4;
 
 /// Espacement des rues, en cellules.
 pub const BLOCK: i32 = 64;
@@ -22,7 +22,7 @@ pub const ROAD: i32 = 6;
 /// Largeur des trottoirs.
 pub const WALK: i32 = 3;
 /// Dessus du sol (première cellule vide).
-pub const GROUND: i32 = 6;
+pub const GROUND: i32 = 30;
 /// Épaisseur des murs, en voxels.
 const WALL: i32 = 2;
 
@@ -120,8 +120,11 @@ pub fn generate(w: &mut VoxelWorld, seed: u64) -> Vec3 {
     let d = w.dims;
 
     // --- Sol : socle, terre, herbe ---
+    // Sol profond : socle, roche, puis plusieurs mètres de terre (assez
+    // pour creuser des cratères et loger des bunkers).
     w.fill(IVec3::ZERO, IVec3::new(d.x, 1, d.z), BEDROCK);
-    w.fill(IVec3::new(0, 1, 0), IVec3::new(d.x, GROUND - 1, d.z), DIRT);
+    w.fill(IVec3::new(0, 1, 0), IVec3::new(d.x, GROUND - 12, d.z), STONE);
+    w.fill(IVec3::new(0, GROUND - 12, 0), IVec3::new(d.x, GROUND - 1, d.z), DIRT);
     w.fill(IVec3::new(0, GROUND - 1, 0), IVec3::new(d.x, GROUND, d.z), GRASS);
 
     // --- Rues (les deux sens) ---
@@ -840,6 +843,67 @@ fn houses(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3) {
     }
 }
 
+/// Bunker enterré : une salle en béton sous la parcelle, éclairée et
+/// meublée, reliée à la surface par un escalier bordé de murets. Seulement
+/// si l'entrée tombe sur un terrain dégagé.
+fn bunker(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3) {
+    let g = GROUND;
+    let (hw, hd) = (rng.range(6, 9), rng.range(4, 6));
+    let cx = (min.x + max.x) / 2 - 6;
+    // Décalé du centre (fontaine, allées en croix des parcs).
+    let cz = (min.z + max.z) / 2 + 9 + rng.range(0, 3);
+    let floor = g - 11; // dessus de la dalle du sol
+    let top = floor + 6; // première cellule du plafond
+    let stairs = top - floor + 4;
+    // L'escalier sort côté +X : il doit rester dans la parcelle et à l'air libre.
+    let exit_x = cx + hw + 2 + stairs;
+    if cx - hw - 1 <= min.x || exit_x + 2 >= max.x || cz - hd - 1 <= min.z || cz + hd + 1 >= max.z {
+        return;
+    }
+    if !free(w, IVec3::new(cx + hw + 1, g, cz - 3), IVec3::new(exit_x + 2, g + 12, cz + 4)) {
+        return;
+    }
+    // Coque en béton, puis l'intérieur vidé.
+    w.fill(IVec3::new(cx - hw - 1, floor - 1, cz - hd - 1), IVec3::new(cx + hw + 2, top + 1, cz + hd + 2), CONCRETE_DARK);
+    w.empty(IVec3::new(cx - hw, floor, cz - hd), IVec3::new(cx + hw + 1, top, cz + hd + 1));
+    // Plafonniers.
+    let mut x = cx - hw + 2;
+    while x < cx + hw - 1 {
+        w.fill(IVec3::new(x, top - 1, cz - 1), IVec3::new(x + 2, top, cz + 1), LAMP);
+        x += 6;
+    }
+    // Lits superposés et caisses le long des murs.
+    let mut z = cz - hd + 1;
+    while z + 2 <= cz + hd {
+        w.fill(IVec3::new(cx - hw, floor, z), IVec3::new(cx - hw + 4, floor + 1, z + 2), FURN_METAL);
+        w.fill(IVec3::new(cx - hw, floor + 1, z), IVec3::new(cx - hw + 4, floor + 2, z + 2), BLUE);
+        z += 4;
+    }
+    for _ in 0..rng.range(2, 5) {
+        let at = IVec3::new(rng.range(cx - hw + 6, cx + hw - 2), floor, rng.range(cz - hd, cz + hd - 1));
+        if free(w, at, at + IVec3::new(2, 2, 2)) {
+            w.fill(at, at + IVec3::new(2, 2, 2), FURN_WOOD);
+        }
+    }
+    // Porte et escalier qui remonte vers +X jusqu'à la surface.
+    w.empty(IVec3::new(cx + hw + 1, floor, cz - 1), IVec3::new(cx + hw + 2, floor + 4, cz + 2));
+    for k in 0..stairs {
+        let x = cx + hw + 2 + k;
+        let step = floor + (k * (g - floor)) / stairs; // marche (niveau où l'on marche)
+        w.fill(IVec3::new(x, floor - 1, cz - 2), IVec3::new(x + 1, step, cz + 3), CONCRETE_DARK);
+        w.empty(IVec3::new(x, step, cz - 1), IVec3::new(x + 1, (step + 5).min(g), cz + 2));
+        // Murets de part et d'autre, jusqu'au-dessus du sol (rambarde).
+        w.fill(IVec3::new(x, step, cz - 2), IVec3::new(x + 1, g + 1, cz - 1), CONCRETE_DARK);
+        w.fill(IVec3::new(x, step, cz + 2), IVec3::new(x + 1, g + 1, cz + 3), CONCRETE_DARK);
+        // Plafond de la descente tant qu'on est sous terre.
+        if step + 5 < g {
+            w.fill(IVec3::new(x, step + 5, cz - 1), IVec3::new(x + 1, g, cz + 2), CONCRETE_DARK);
+        }
+    }
+    // Muret au fond de la trémie, côté bunker.
+    w.fill(IVec3::new(cx + hw + 1, g, cz - 2), IVec3::new(cx + hw + 2, g + 1, cz + 3), CONCRETE_DARK);
+}
+
 fn park(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3) {
     // Allée en croix.
     let mx = (min.x + max.x) / 2;
@@ -861,6 +925,8 @@ fn park(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3) {
     // Bancs.
     for (x, z) in [(mx - 8, mz + 3), (mx + 5, mz - 5)] {
         w.fill(IVec3::new(x, min.y, z), IVec3::new(x + 4, min.y + 1, z + 1), WOOD);
+    }    if rng.chance(0.45) {
+        bunker(w, rng, min, max);
     }
 }
 
@@ -878,6 +944,9 @@ fn parking(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3) {
             car(w, rng, IVec3::new(x + 1, min.y, max.z - 14));
         }
         x += 7;
+    }
+    if rng.chance(0.3) {
+        bunker(w, rng, min, max);
     }
 }
 
@@ -1082,6 +1151,23 @@ mod tests {
             }
         }
         assert!(lost.is_empty(), "blocs en l'air (matériau → nombre) : {lost:?}, ex. {example:?}");
+    }
+
+    /// Des bunkers existent : salles vides sous le sol, éclairées.
+    #[test]
+    fn bunkers_are_generated() {
+        let mut w = VoxelWorld::with_blocks(8);
+        w.rebuild(77);
+        let mut rooms = 0;
+        for x in (2..w.dims.x - 2).step_by(3) {
+            for z in (2..w.dims.z - 2).step_by(3) {
+                let c = IVec3::new(x, GROUND - 9, z);
+                if !w.is_solid(c) && w.is_solid(c - IVec3::Y * 3) && w.is_solid(c + IVec3::Y * 6) {
+                    rooms += 1;
+                }
+            }
+        }
+        assert!(rooms > 10, "cellules de bunker trouvées : {rooms}");
     }
 
     /// Deux joueurs ne doivent pas réapparaître au même endroit.

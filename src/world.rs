@@ -19,7 +19,7 @@ pub const VOXEL: f32 = 0.4;
 
 /// Dimensions de la grille (X, Y, Z) en cellules : 845 × 25 × 845 m
 /// (33 × 33 pâtés de maisons, soit ~30 fois l'ancienne carte).
-pub const GRID: [i32; 3] = [2112, 64, 2112];
+pub const GRID: [i32; 3] = [2112, 96, 2112];
 
 /// Taille par défaut de la carte : 33 × 33 pâtés de maisons.
 pub const DEFAULT_BLOCKS: i32 = 33;
@@ -49,6 +49,9 @@ const CHUNK_CELLS: usize = (MESH_CHUNK * MESH_CHUNK * MESH_CHUNK) as usize;
 /// cellule (2 Ko au lieu de 4 Ko), avec repli sur 8 bits si un morceau
 /// mélange plus de 16 matériaux.
 enum MatStore {
+    /// Un seul matériau dans tout le morceau (terre profonde, dalles…) :
+    /// aucune allocation, ~2 Ko de gagnés par morceau.
+    Uniform(u8),
     Narrow { pal: [u8; 16], len: u8, idx: Box<[u8; CHUNK_CELLS / 2]> },
     Wide(Box<[u8; CHUNK_CELLS]>),
 }
@@ -57,6 +60,7 @@ impl MatStore {
     #[inline]
     fn get(&self, i: usize) -> u8 {
         match self {
+            MatStore::Uniform(m) => *m,
             MatStore::Narrow { pal, idx, .. } => {
                 let b = idx[i >> 1];
                 pal[(if i & 1 == 0 { b & 15 } else { b >> 4 }) as usize]
@@ -66,7 +70,17 @@ impl MatStore {
     }
 
     fn set(&mut self, i: usize, m: u8) {
+        if let MatStore::Uniform(u) = *self {
+            if u == m {
+                return;
+            }
+            // Deux matériaux : palette 4 bits, tout à l'entrée 0 (= `u`).
+            let mut pal = [0u8; 16];
+            pal[0] = u;
+            *self = MatStore::Narrow { pal, len: 1, idx: Box::new([0; CHUNK_CELLS / 2]) };
+        }
         match self {
+            MatStore::Uniform(_) => {}
             MatStore::Narrow { pal, len, idx } => {
                 let found = pal[..*len as usize].iter().position(|&p| p == m);
                 let slot = match found {
@@ -110,12 +124,8 @@ impl Chunk {
     fn new() -> Box<Self> {
         Box::new(Self {
             solid: [0; CHUNK_CELLS / 64],
-            // Entrée 0 = matériau 0 : un morceau neuf lit 0 partout.
-            mat: MatStore::Narrow {
-                pal: [0; 16],
-                len: 1,
-                idx: Box::new([0; CHUNK_CELLS / 2]),
-            },
+            // Un morceau neuf lit 0 partout, sans allocation.
+            mat: MatStore::Uniform(0),
         })
     }
 }
@@ -286,6 +296,13 @@ impl VoxelWorld {
         let bit = 1u64 << (i & 63);
         if solid {
             let ch = self.chunks[k].get_or_insert_with(Chunk::new);
+            // Morceau encore vide : il prend le matériau de son premier voxel
+            // (et reste « uniforme » tant qu'on n'en mélange pas d'autres).
+            if let MatStore::Uniform(u) = ch.mat {
+                if u != material && ch.solid.iter().all(|w| *w == 0) {
+                    ch.mat = MatStore::Uniform(material);
+                }
+            }
             if ch.solid[i >> 6] & bit == 0 {
                 ch.solid[i >> 6] |= bit;
                 self.alive += 1;
@@ -931,7 +948,7 @@ pub struct VoxelAssets {
 }
 
 /// Palette (sRGB) : couleur par identifiant de matériau.
-pub const PALETTE: [(f32, f32, f32); 22] = [
+pub const PALETTE: [(f32, f32, f32); 23] = [
     (0.58, 0.58, 0.55), // 0 béton
     (0.36, 0.36, 0.35), // 1 béton sombre
     (0.17, 0.17, 0.18), // 2 asphalte
@@ -954,6 +971,7 @@ pub const PALETTE: [(f32, f32, f32); 22] = [
     (0.07, 0.07, 0.08), // 19 noir (pneus, écrans)
     (0.72, 0.52, 0.30), // 20 bois de mobilier
     (0.34, 0.36, 0.40), // 21 métal de mobilier
+    (0.40, 0.39, 0.37), // 22 roche (sous-sol)
 ];
 
 /// Couleur linéaire d'un matériau : les couleurs de sommets sont lues en
@@ -991,6 +1009,8 @@ pub mod mat {
     /// Mobilier : n'appartient pas à la structure d'un bâtiment.
     pub const FURN_WOOD: u8 = 20;
     pub const FURN_METAL: u8 = 21;
+    /// Roche du sous-sol (sous la terre).
+    pub const STONE: u8 = 22;
 
     /// Matériaux proposés par l'outil de construction.
     pub const BUILD: [u8; 9] = [WOOD, BRICK, CONCRETE, METAL, GLASS, PLASTER, ROOF, BLACK, LAMP];
