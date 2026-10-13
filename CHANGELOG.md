@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.7.0
+
+- **Eau** : simulation voxel (chute, étalement, remplissage des creux, bunkers et escaliers),
+  nage, l'eau éteint le feu, les bouches d'incendie cassées fuient.
+- **Catastrophes** : tornades (arrachent, aspirent et projettent), tsunamis (vague qui
+  balaie la ville puis l'inonde), pluie (averses aléatoires, éteint le feu). Boutons de
+  l'hôte dans le menu pause, commandes `tornado`, `tsunami`, `rain`, `drain`.
+- **Explosions** : débris projetés selon la puissance (jusque sur les bâtiments voisins),
+  plus nombreux et dangereux, étincelles, onde de choc, champignon de fumée.
+- **Sol profond** (12 m : roche et terre) et **bunkers** sous les parcs et parkings.
+- **Chargement** : détail des étapes (génération, morceaux maillés, modifications reçues).
+- **Performances** : maillage du terrain sur tous les cœurs (plus de délai après une
+  grosse explosion), morceaux d'un seul matériau compressés.
+- **Corrections** : roues à leur place, caméra qui ne saute plus au contact d'une voiture,
+  débris qui ne se téléportent plus, portes qui ne se ferment plus sur un joueur (et plus
+  d'éjection sur le toit), débris figés qui ne coincent plus les joueurs (ni l'anti-triche),
+  chat vraiment modéré (mots déguisés, liens, majuscules).
+- Les mondes sauvegardés avec une version précédente ne se chargent plus (carte modifiée).
+
 ## 1.6.1
 
 - **Langue** : les valeurs des réglages ne disparaissent plus après un changement de langue.

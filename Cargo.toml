@@ -1,6 +1,6 @@
 [package]
 name = "boomground"
-version = "1.6.1"
+version = "1.7.0"
 edition = "2021"
 description = "Destruction de voxels en bac à sable ou en mode boutique."
 license-file = "LICENSE"

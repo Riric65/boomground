@@ -62,6 +62,8 @@ pub enum MenuAction {
     Tab(Tab),
     Resume,
     SaveWorld,
+    /// Commande de l'hôte (catastrophes naturelles).
+    Nature(&'static str),
     LoadWorld(usize),
     JoinServer(usize),
     RemoveServer(usize),
@@ -131,6 +133,24 @@ pub struct OnlyWhenStarted;
 /// appartient à l'hébergeur.
 #[derive(Component)]
 pub struct SoloOnly;
+
+/// Boutons de catastrophes : hôte ou solo, en partie.
+#[derive(Component)]
+pub struct HostTools;
+
+pub fn host_tools(
+    game: Res<GameState>,
+    lobby: Res<crate::net::client::Lobby>,
+    mut nodes: Query<&mut Node, With<HostTools>>,
+) {
+    let on = game.started && (lobby.solo || lobby.is_host());
+    let d = if on { Display::Flex } else { Display::None };
+    for mut n in &mut nodes {
+        if n.display != d {
+            n.display = d;
+        }
+    }
+}
 
 pub fn solo_only(
     game: Res<GameState>,
@@ -450,6 +470,35 @@ pub fn setup(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>)
                     ),
                 ))
                 .with_child(ui::label(&font, "Sauvegarder le monde", 17.0, ui::TEXT));
+                // Catastrophes (hôte ou solo).
+                side.spawn((
+                    HostTools,
+                    Node {
+                        width: Val::Percent(100.0),
+                        flex_wrap: FlexWrap::Wrap,
+                        column_gap: px(6.0),
+                        row_gap: px(6.0),
+                        margin: UiRect::bottom(px(14.0)),
+                        display: Display::None,
+                        ..default()
+                    },
+                ))
+                .with_children(|row| {
+                    for (cmd, label) in [("tornado", "Tornade"), ("tsunami", "Tsunami"), ("rain", "Pluie"), ("drain", "Assécher")] {
+                        row.spawn((
+                            MenuAction::Nature(cmd),
+                            ui::button_with(
+                                Node {
+                                    width: Val::Percent(48.0),
+                                    height: px(36.0),
+                                    ..default()
+                                },
+                                ui::BUTTON,
+                            ),
+                        ))
+                        .with_child(ui::label(&font, label, 15.0, ui::TEXT));
+                    }
+                });
                 nav_button(side, &font, Tab::Play, "Jouer");
                 nav_button(side, &font, Tab::Multi, "Multijoueur");
                 nav_button(side, &font, Tab::Settings, "Paramètres");
@@ -1272,6 +1321,12 @@ pub fn actions(
                         Ok(()) => state.status = format!("Connexion à {}…", entry.name),
                         Err(e) => state.status = e,
                     }
+                }
+            }
+            MenuAction::Nature(cmd) => {
+                if net.is_online() {
+                    net.send_raw(crate::net::protocol::Packet::Command { text: cmd.to_string() });
+                    game.phase = Phase::Playing;
                 }
             }
             MenuAction::SaveWorld => {

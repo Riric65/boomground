@@ -114,6 +114,16 @@ pub fn force_playing(
             exit.write(AppExit::Success);
         }
     }
+    // `BOOM_CMD=tornado,rain` (séparées par des virgules) : commandes d'hôte
+    // envoyées après `BOOM_CMD_AT` secondes (6 par défaut).
+    if let Ok(cmds) = std::env::var("BOOM_CMD") {
+        let at = std::env::var("BOOM_CMD_AT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(6.0);
+        if elapsed > at && elapsed - time.delta_secs() <= at {
+            for c in cmds.split(',') {
+                net.send_raw(crate::net::protocol::Packet::Command { text: c.trim().to_string() });
+            }
+        }
+    }
     if let Some(start) = std::env::var("BOOM_START_AFTER").ok().and_then(|v| v.parse::<f32>().ok()) {
         if elapsed > start && lobby.is_host() && !lobby.started && net.is_online() {
             net.send_raw(crate::net::protocol::Packet::Start);

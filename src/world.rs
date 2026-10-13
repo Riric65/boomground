@@ -948,7 +948,7 @@ pub struct VoxelAssets {
 }
 
 /// Palette (sRGB) : couleur par identifiant de matériau.
-pub const PALETTE: [(f32, f32, f32); 23] = [
+pub const PALETTE: [(f32, f32, f32); 24] = [
     (0.58, 0.58, 0.55), // 0 béton
     (0.36, 0.36, 0.35), // 1 béton sombre
     (0.17, 0.17, 0.18), // 2 asphalte
@@ -972,6 +972,7 @@ pub const PALETTE: [(f32, f32, f32); 23] = [
     (0.72, 0.52, 0.30), // 20 bois de mobilier
     (0.34, 0.36, 0.40), // 21 métal de mobilier
     (0.40, 0.39, 0.37), // 22 roche (sous-sol)
+    (0.16, 0.42, 0.66), // 23 eau (affichage seulement)
 ];
 
 /// Couleur linéaire d'un matériau : les couleurs de sommets sont lues en

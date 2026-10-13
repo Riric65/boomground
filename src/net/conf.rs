@@ -20,6 +20,8 @@ pub struct Rules {
     pub fall_damage: bool,
     /// Un bâtiment dont la base est détruite s'écroule.
     pub gravity_collapse: bool,
+    /// Averses de pluie aléatoires.
+    pub weather: bool,
     /// Les joueurs peuvent poser des blocs.
     pub allow_building: bool,
     /// Les portes sont interactives.
@@ -66,6 +68,7 @@ impl Default for Rules {
             respawn: crate::game::RESPAWN_TIME,
             fall_damage: true,
             gravity_collapse: true,
+            weather: true,
             allow_building: true,
             allow_doors: true,
             disabled_weapons: Vec::new(),
@@ -149,6 +152,8 @@ keep_inventory = true
 # Un bâtiment dont la base est détruite s'écroule (corps rigides). Si
 # false, les ruines restent en l'air comme dans un jeu d'avant.
 gravity_collapse = true
+# Averses de pluie de temps en temps (la pluie éteint peu à peu le feu).
+weather = true
 # Les joueurs peuvent poser des blocs (outil Blocs).
 allow_building = true
 # Les portes sont interactives.
@@ -284,6 +289,7 @@ pub fn load() -> ServerConf {
             "spawn_protection" => r.spawn_protection = value.parse().unwrap_or(r.spawn_protection).clamp(0.0, 30.0),
             "keep_inventory" => r.keep_inventory = flag(r.keep_inventory),
             "gravity_collapse" => r.gravity_collapse = flag(r.gravity_collapse),
+            "weather" => r.weather = flag(r.weather),
             "allow_building" => r.allow_building = flag(r.allow_building),
             "allow_doors" => r.allow_doors = flag(r.allow_doors),
             "starting_money" => r.starting_money = value.parse().unwrap_or(0),

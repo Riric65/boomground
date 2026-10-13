@@ -703,6 +703,39 @@ impl Sim {
         }
     }
 
+    /// Vent tourbillonnant (tornade) : aspire, fait tourner et soulève les
+    /// gravats et les corps autour de `center` (au sol), dans `radius`.
+    pub fn apply_wind(&mut self, center: Vec3, radius: f32, dt: f32) {
+        let force = |p: Vec3| -> Option<Vec3> {
+            let d = Vec3::new(p.x - center.x, 0.0, p.z - center.z);
+            let dist = d.length();
+            if dist > radius || p.y > center.y + 40.0 {
+                return None;
+            }
+            let f = 1.0 - dist / radius;
+            let out = d / dist.max(0.3);
+            let tangent = Vec3::new(-out.z, 0.0, out.x);
+            Some((tangent * 22.0 - out * 9.0 + Vec3::Y * (26.0 + 10.0 * f)) * f)
+        };
+        for b in &mut self.blocks {
+            if let Some(a) = force(b.pos) {
+                b.sleeping = false;
+                b.rest = 0.0;
+                b.vel += a * dt;
+                b.vel = b.vel.clamp_length_max(35.0);
+                b.spin += 6.0 * dt;
+            }
+        }
+        for body in &mut self.bodies {
+            if let Some(a) = force(body.pos) {
+                // Les gros corps résistent (ils pèsent plus lourd).
+                let k = (40.0 / body.mass.max(1.0)).clamp(0.05, 1.0);
+                body.lin += a * dt * k;
+                body.rest = 0.0;
+            }
+        }
+    }
+
     /// Réveille les blocs endormis qui n'ont plus rien dessous.
     pub fn wake_unsupported(&mut self, world: &VoxelWorld) {
         let boxes: Vec<(Vec3, Vec3)> = self

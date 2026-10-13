@@ -249,6 +249,18 @@ struct ServerState {
     last_pose: Instant,
     last_unsupported: Instant,
     unsupported_for: f32,
+    /// Eau (automate cellulaire) et pas de simulation de l'eau.
+    water: crate::water::Water,
+    water_timer: f32,
+    /// Pluie (0..1), durée restante, prochaine averse (secondes).
+    rain: f32,
+    rain_left: f32,
+    rain_next: f32,
+    rain_sent: u8,
+    tornadoes: Vec<Tornado>,
+    tornado_seq: u32,
+    tornado_timer: f32,
+    tsunami: Option<Tsunami>,
     last_autosave: Instant,
     last_idle_check: Instant,
     responder: Responder,
@@ -482,6 +494,16 @@ fn server_app(
         last_pose: now,
         last_unsupported: now,
         unsupported_for: 0.0,
+        water: crate::water::Water::default(),
+        water_timer: 0.0,
+        rain: 0.0,
+        rain_left: 0.0,
+        rain_next: 420.0,
+        rain_sent: 0,
+        tornadoes: Vec::new(),
+        tornado_seq: 0,
+        tornado_timer: 0.0,
+        tsunami: None,
         last_autosave: now,
         last_idle_check: now,
         responder: Responder::new(),
@@ -1312,6 +1334,10 @@ fn reset_world(server: &mut ServerState, seed: u64) {
     server.history.clear();
     server.events.clear();
     server.fire.clear();
+    server.water.clear();
+    server.tornadoes.clear();
+    server.tsunami = None;
+    broadcast(server, None, &Packet::Tornadoes { list: Vec::new() });
     server.car_bodies.clear();
     for c in server.clients.values_mut() {
         c.driving = None;
@@ -1468,6 +1494,31 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
             .map(|c| IVec3::new(c[0] as i32, c[1] as i32, c[2] as i32))
             .collect();
         server.events.append(&mut ev);
+        // Un morceau ne se fige pas dans un joueur : les voxels qui
+        // tomberaient dans sa boîte sont retirés (sinon il se retrouvait
+        // « dans un mur », coincé, et l'anti-triche le sanctionnait).
+        let boxes: Vec<(Vec3, Vec3)> = server
+            .clients
+            .values()
+            .filter(|c| c.joined && c.dead_until.is_none())
+            .map(|c| (c.pos + Vec3::new(-0.35, -0.05, -0.35), c.pos + Vec3::new(0.35, 1.8, 0.35)))
+            .collect();
+        let inside: Vec<IVec3> = placed
+            .iter()
+            .copied()
+            .filter(|&cell| {
+                let lo = server.world.cell_min(cell);
+                let hi = lo + Vec3::splat(crate::world::VOXEL);
+                boxes.iter().any(|(a, b)| lo.cmplt(*b).all() && hi.cmpgt(*a).all())
+            })
+            .collect();
+        if !inside.is_empty() {
+            flush_events(&mut server);
+            for &c in &inside {
+                server.world.set(c, false, 0);
+            }
+            broadcast_removed(&mut server, &inside);
+        }
         if !placed.is_empty() && server.config.rules.gravity_collapse {
             let comps = server.world.collapse_components(&placed);
             if !comps.is_empty() {
@@ -1499,6 +1550,7 @@ fn serve(mut server: ResMut<ServerState>, time: Res<Time>) {
             server.last_fire = now;
             fire_tick(&mut server, since);
         }
+        nature_tick(&mut server, dt);
     }
 
     // Recharges terminées.
@@ -1920,6 +1972,22 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
                 suspect(server, id, 2.0, "porte hors de portée");
                 return;
             }
+            // Personne dans le passage : une porte ne se referme pas sur un
+            // joueur (il était ensuite éjecté au-dessus du mur).
+            let target = if d.is_open { d.closed.clone() } else { d.open.clone() };
+            let blocked = server.clients.values().filter(|c| c.joined && c.dead_until.is_none()).any(|c| {
+                let lo = c.pos + Vec3::new(-0.32, 0.0, -0.32);
+                let hi = c.pos + Vec3::new(0.32, 1.75, 0.32);
+                target.iter().any(|&cell| {
+                    let cmin = server.world.cell_min(cell);
+                    let cmax = cmin + Vec3::splat(crate::world::VOXEL);
+                    cmin.cmplt(hi).all() && cmax.cmpgt(lo).all()
+                })
+            });
+            if blocked {
+                notice(server, id, "Quelqu'un bloque la porte.");
+                return;
+            }
             if let Some(edits) = server.world.toggle_door(index) {
                 let open = server.world.doors[index].is_open;
                 broadcast_placed(server, &edits);
@@ -2052,22 +2120,104 @@ fn handle(server: &mut ServerState, id: u16, packet: Packet) {
 /// Remplace les mots interdits par des étoiles (sans tenir compte de la
 /// casse).
 fn filter_text(text: &str, words: &[String]) -> String {
-    let mut out = text.to_string();
-    for w in words {
-        let mut lower = out.to_lowercase();
-        // Les accents ne changent pas la longueur en octets pour ces
-        // comparaisons simples : on se limite aux correspondances sûres.
-        while let Some(i) = lower.find(w.as_str()) {
-            if out.is_char_boundary(i) && out.is_char_boundary(i + w.len()) && out.len() == lower.len() {
-                out.replace_range(i..i + w.len(), &"*".repeat(w.chars().count()));
-                lower.replace_range(i..i + w.len(), &"*".repeat(w.chars().count()));
+    // Lettre « squelette » d'un caractère : minuscule, sans accent, chiffres
+    // et symboles courants ramenés à la lettre qu'ils imitent. `None` pour
+    // les séparateurs (espaces, points, tirets…) qu'on saute.
+    fn skeleton(c: char) -> Option<char> {
+        let c = c.to_lowercase().next().unwrap_or(c);
+        Some(match c {
+            'à' | 'á' | 'â' | 'ä' | 'ã' | 'å' | '@' | '4' => 'a',
+            'é' | 'è' | 'ê' | 'ë' | '3' | '€' => 'e',
+            'î' | 'ï' | 'í' | 'ì' | '1' | '!' | '|' => 'i',
+            'ô' | 'ö' | 'ó' | 'ò' | 'õ' | '0' => 'o',
+            'û' | 'ü' | 'ú' | 'ù' => 'u',
+            'ç' => 'c',
+            'ñ' => 'n',
+            '$' | '5' => 's',
+            '7' => 't',
+            'ß' => 's',
+            c if c.is_alphabetic() => c,
+            _ => return None,
+        })
+    }
+    let chars: Vec<char> = text.chars().collect();
+    // Squelette du message et, pour chaque lettre, son indice d'origine ;
+    // les lettres répétées (« fuuuck ») sont fusionnées.
+    let mut skel: Vec<char> = Vec::new();
+    let mut origin: Vec<usize> = Vec::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if let Some(k) = skeleton(c) {
+            if skel.last() == Some(&k) {
+                *origin.last_mut().unwrap() = i;
+                continue;
+            }
+            skel.push(k);
+            origin.push(i);
+        }
+    }
+    let mut hide = vec![false; chars.len()];
+    let defaults = DEFAULT_BANNED.iter().map(|w| w.to_string());
+    for w in defaults.chain(words.iter().cloned()) {
+        let mut pat: Vec<char> = Vec::new();
+        for c in w.chars().filter_map(skeleton) {
+            if pat.last() != Some(&c) {
+                pat.push(c);
+            }
+        }
+        if pat.len() < 3 {
+            continue;
+        }
+        let mut i = 0;
+        while i + pat.len() <= skel.len() {
+            if skel[i..i + pat.len()] == pat[..] {
+                // Début de mot seulement (« classe » ne contient pas un mot
+                // interdit au milieu) : lettre précédente absente ou séparée.
+                let start = origin[i];
+                let word_start = i == 0 || origin[i - 1] + 1 < start || !chars[start - 1].is_alphanumeric();
+                if word_start || pat.len() >= 5 {
+                    for h in hide.iter_mut().take(origin[i + pat.len() - 1] + 1).skip(start) {
+                        *h = true;
+                    }
+                }
+                i += pat.len();
             } else {
-                break;
+                i += 1;
             }
         }
     }
+    let mut out: String = chars
+        .iter()
+        .zip(&hide)
+        .map(|(&c, &h)| if h && !c.is_whitespace() { '*' } else { c })
+        .collect();
+    // Liens : remplacés (pubs, hameçonnage).
+    for scheme in ["http://", "https://", "www.", "discord.gg/"] {
+        while let Some(i) = out.to_lowercase().find(scheme) {
+            let end = out[i..].find(' ').map_or(out.len(), |e| i + e);
+            if !out.is_char_boundary(i) || !out.is_char_boundary(end) {
+                break;
+            }
+            out.replace_range(i..end, "[lien]");
+        }
+    }
+    // Majuscules partout : ramenées en minuscules.
+    let letters = out.chars().filter(|c| c.is_alphabetic()).count();
+    let upper = out.chars().filter(|c| c.is_uppercase()).count();
+    if letters >= 8 && upper * 10 >= letters * 7 {
+        out = out.to_lowercase();
+    }
     out
 }
+
+/// Mots filtrés par défaut (en plus de `chat_filter`), sous forme de
+/// squelette : insultes et injures courantes (fr, en, es, de).
+const DEFAULT_BANNED: &[&str] = &[
+    "connard", "connasse", "salope", "pute", "putain", "encule", "enculer", "fdp", "ntm", "nique", "batard", "pd", "tapette",
+    "negro", "negre", "bougnoule", "youpin", "suicide toi", "va te tuer",
+    "fuck", "fucker", "motherfucker", "shit", "bitch", "cunt", "whore", "slut", "faggot", "fag", "nigger", "nigga", "retard", "kys",
+    "puta", "puto", "cabron", "gilipollas", "maricon", "mierda", "joder", "coño",
+    "scheisse", "hurensohn", "fotze", "wichser", "arschloch", "schwuchtel", "missgeburt",
+];
 
 /// Monte dans une voiture : la première fois, ses voxels deviennent un
 /// corps rigide conduisible.
@@ -2392,6 +2542,11 @@ fn handle_join(server: &mut ServerState, id: u16, name: String, token: u64, vers
     for chunk in fires.chunks(4000) {
         stream.push(Packet::Fire { add: chunk.to_vec(), remove: Vec::new() }.encode());
     }
+    let water: Vec<[u16; 3]> = server.water.visible().iter().map(|c| [c.x as u16, c.y as u16, c.z as u16]).collect();
+    for chunk in water.chunks(8000) {
+        stream.push(Packet::Water { add: chunk.to_vec(), remove: Vec::new() }.encode());
+    }
+    stream.push(Packet::Weather { rain: server.rain_sent }.encode());
 
     // Données d'un joueur déjà connu (même nom).
     let saved = server.players.get(&unique).cloned();
@@ -2530,14 +2685,17 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
     let dy = pos.y - c.pos.y;
     let too_fast = level > 0 && (horizontal > max_h * dt * 1.2 + 0.7 || dy > max_up * dt * 1.2 + 0.7);
     // Traversée de mur : la nouvelle boîte ne doit pas être dans du solide.
-    let inside = level > 0 && {
+    let torso = |p: Vec3| {
         // Boîte nettement plus petite que celle du client : la carte du
         // serveur peut avoir un voxel d'avance ou de retard (explosion,
         // porte, marche montée), et ça ne doit pas passer pour de la triche.
-        let lo = pos + Vec3::new(-0.18, 0.7, -0.18);
-        let hi = pos + Vec3::new(0.18, 1.4, 0.18);
-        server.world.overlaps(lo, hi)
+        server.world.overlaps(p + Vec3::new(-0.18, 0.7, -0.18), p + Vec3::new(0.18, 1.4, 0.18))
     };
+    // Déjà coincé à la position acceptée (débris figés, porte, carte qui
+    // change autour de lui) : le joueur essaie d'en sortir, ce n'est pas
+    // de la triche.
+    let was_stuck = torso(c.pos);
+    let inside = level > 0 && !was_stuck && torso(pos);
     let Some(c) = server.clients.get_mut(&id) else { return };
     if too_fast || inside {
         c.rejected += 1;
@@ -2552,7 +2710,7 @@ fn handle_state(server: &mut ServerState, id: u16, pos: Vec3, yaw: f32, pitch: f
         // consécutifs : un état isolé qui dépasse le seuil (à-coup réseau,
         // gravat qui pousse le joueur) ne doit plus être facturé.
         if rejected == STRIKE_AFTER || rejected % 20 == 0 {
-            suspect(server, id, if inside { 2.0 } else { 3.0 }, if inside { "traverse les murs" } else { "déplacement trop rapide" });
+            suspect(server, id, if inside { 1.0 } else { 3.0 }, if inside { "traverse les murs" } else { "déplacement trop rapide" });
         }
         return;
     }
@@ -2833,6 +2991,7 @@ fn handle_hit(server: &mut ServerState, id: u16, kind: HitKind, origin: Vec3, di
             let s = &mut *server;
             s.sim.form_bodies(&s.world, comps, &mut ev);
         }
+        after_destruction(server, &destroyed);
         server.events.append(&mut ev);
         server.unsupported_for = 3.0;
         flush_events(server);
@@ -2870,6 +3029,27 @@ fn handle_command(server: &mut ServerState, id: u16, text: &str) {
             let seed = crate::game::parse_seed(&arg).unwrap_or_else(random_seed);
             reset_world(server, seed);
         }
+        "tornado" | "tornade" => {
+            let at = server.clients.get(&id).map(|c| c.pos).unwrap_or(Vec3::ZERO);
+            spawn_tornado(server, at);
+            notice(server, id, "Une tornade arrive !");
+        }
+        "tsunami" => {
+            let at = server.clients.get(&id).map(|c| c.pos).unwrap_or(Vec3::ZERO);
+            start_tsunami(server, at);
+            notice(server, id, "Un tsunami arrive !");
+        }
+        "rain" | "pluie" => {
+            if server.rain > 0.0 {
+                server.rain_left = 0.0;
+            } else {
+                server.rain_left = 180.0;
+            }
+        }
+        "drain" | "assecher" => {
+            let shown = server.water.drain_all();
+            send_water(server, Vec::new(), shown);
+        }
         "pause" if server.config.solo => {
             server.paused = arg != "off";
             server.last_sim = Instant::now();
@@ -2904,8 +3084,361 @@ fn encode_history(history: &[[u16; 4]]) -> Vec<Vec<u8>> {
     out
 }
 
+
+// ---------------------------------------------------------------------------
+// Nature : eau, pluie, tornades, tsunamis
+// ---------------------------------------------------------------------------
+
+struct Tornado {
+    id: u32,
+    /// Position au sol.
+    pos: Vec3,
+    dir: Vec3,
+    life: f32,
+    radius: f32,
+}
+
+struct Tsunami {
+    /// La vague avance le long de Z (sinon X).
+    along_z: bool,
+    sign: i32,
+    /// Front (indice de cellule sur l'axe d'avancée).
+    front: f32,
+    last: i32,
+    /// Couloir sur l'autre axe.
+    lo: i32,
+    hi: i32,
+    height: i32,
+}
+
+/// Matériaux arrachés par le vent ou la vague (et, rarement, le plâtre).
+fn weak(material: u8) -> bool {
+    use crate::world::mat::*;
+    matches!(material, GLASS | WOOD | FURN_WOOD | FURN_METAL | LEAVES | ROOF | LAMP | RED | BLUE | BLACK)
+}
+
+/// Suites d'une destruction : l'eau voisine s'engouffre, les bouches
+/// d'incendie cassées se mettent à fuir.
+fn after_destruction(server: &mut ServerState, cells: &[IVec3]) {
+    server.water.wake_around(cells);
+    let g = crate::map::GROUND;
+    let mut leaks = 0;
+    for &c in cells {
+        if leaks < 3 && (g..g + 3).contains(&c.y) && server.world.material(c) == crate::world::mat::RED {
+            server.water.add_source(c, 4, 25.0);
+            leaks += 1;
+        }
+    }
+}
+
+/// Envoie aux clients les cellules d'eau apparues / disparues.
+fn broadcast_water(server: &mut ServerState) {
+    let (add, remove) = server.water.visible_delta();
+    send_water(server, add, remove);
+}
+
+fn send_water(server: &mut ServerState, add: Vec<IVec3>, remove: Vec<IVec3>) {
+    if add.is_empty() && remove.is_empty() {
+        return;
+    }
+    let pack = |v: &[IVec3]| v.iter().map(|c| [c.x as u16, c.y as u16, c.z as u16]).collect::<Vec<_>>();
+    for chunk in add.chunks(8000) {
+        broadcast(server, None, &Packet::Water { add: pack(chunk), remove: Vec::new() });
+    }
+    for chunk in remove.chunks(8000) {
+        broadcast(server, None, &Packet::Water { add: Vec::new(), remove: pack(chunk) });
+    }
+}
+
+/// Détruit des voxels (vent, vague) : gravats projetés, effondrements.
+fn destroy_cells(server: &mut ServerState, cells: Vec<IVec3>, center: Vec3, push: Vec3) {
+    if cells.is_empty() {
+        return;
+    }
+    let mut destroyed = cells;
+    for &c in &destroyed {
+        server.world.set(c, false, 0);
+    }
+    let mut ev = Vec::new();
+    {
+        let s = &mut *server;
+        let ids = s.sim.add_rubble(&s.world, &destroyed, center, push);
+        if !ids.is_empty() {
+            ev.push(SimEvent::BlocksAdded(ids));
+        }
+    }
+    let comps = if server.config.rules.gravity_collapse {
+        server.world.collapse_components(&destroyed)
+    } else {
+        Vec::new()
+    };
+    for comp in &comps {
+        destroyed.extend_from_slice(comp);
+    }
+    broadcast_removed(server, &destroyed);
+    if !comps.is_empty() {
+        let s = &mut *server;
+        s.sim.form_bodies(&s.world, comps, &mut ev);
+    }
+    after_destruction(server, &destroyed);
+    server.events.append(&mut ev);
+    server.unsupported_for = 3.0;
+    flush_events(server);
+}
+
+fn spawn_tornado(server: &mut ServerState, near: Vec3) {
+    if server.tornadoes.len() >= 3 {
+        return;
+    }
+    server.tornado_seq += 1;
+    let a = fire_rand(server) * std::f32::consts::TAU;
+    let start = near + Vec3::new(a.cos(), 0.0, a.sin()) * 70.0;
+    let dir = (near - start).with_y(0.0).normalize_or_zero();
+    let ground = server.world.ground_height(start.x, start.z);
+    server.tornadoes.push(Tornado {
+        id: server.tornado_seq,
+        pos: Vec3::new(start.x, ground, start.z),
+        dir,
+        life: 70.0,
+        radius: 7.0,
+    });
+}
+
+fn start_tsunami(server: &mut ServerState, near: Vec3) {
+    let d = server.world.dims;
+    let c = server.world.world_to_cell(near);
+    let along_z = fire_rand(server) < 0.5;
+    let sign = if fire_rand(server) < 0.5 { 1 } else { -1 };
+    let (len, across, along) = if along_z { (d.z, c.x, c.z) } else { (d.x, c.z, c.x) };
+    // Départ à ~60 m de l'hôte (depuis le bord, la vague mettait plus d'une
+    // minute à arriver sur une grande carte).
+    let front = (along - sign * 150).clamp(2, len - 3) as f32;
+    let width = if along_z { d.x } else { d.z };
+    server.tsunami = Some(Tsunami {
+        along_z,
+        sign,
+        front,
+        last: front as i32,
+        lo: (across - 80).max(2),
+        hi: (across + 80).min(width - 2),
+        height: 14,
+    });
+}
+
+fn nature_tick(server: &mut ServerState, dt: f32) {
+    // --- Pluie : averses de temps en temps ---
+    if server.rain_left > 0.0 {
+        server.rain_left -= dt;
+        server.rain = (server.rain + dt * 0.2).min(1.0);
+    } else {
+        server.rain = (server.rain - dt * 0.2).max(0.0);
+        if server.config.rules.weather {
+            server.rain_next -= dt;
+            if server.rain_next <= 0.0 {
+                server.rain_next = 400.0 + fire_rand(server) * 600.0;
+                server.rain_left = 90.0 + fire_rand(server) * 150.0;
+            }
+        }
+    }
+    let rain = (server.rain * 255.0) as u8;
+    if rain.abs_diff(server.rain_sent) > 12 || (rain == 0) != (server.rain_sent == 0) {
+        server.rain_sent = rain;
+        broadcast(server, None, &Packet::Weather { rain });
+    }
+
+    server.water_timer += dt;
+    if server.water_timer < 0.1 {
+        return;
+    }
+    let step = server.water_timer;
+    server.water_timer = 0.0;
+
+    // --- Tsunami ---
+    if let Some(mut t) = server.tsunami.take() {
+        let d = server.world.dims;
+        let len = if t.along_z { d.z } else { d.x };
+        t.front += t.sign as f32 * 28.0 * step;
+        let now_front = t.front as i32;
+        let g = crate::map::GROUND;
+        let progress = if t.sign > 0 { now_front as f32 / len as f32 } else { 1.0 - now_front as f32 / len as f32 };
+        let h = (t.height as f32 * (1.0 - progress * 0.5)) as i32;
+        let cell = |a: i32, b: i32, y: i32| if t.along_z { IVec3::new(b, y, a) } else { IVec3::new(a, y, b) };
+        let mut weak_cells = Vec::new();
+        let mut a = t.last;
+        while a != now_front && (0..len).contains(&a) {
+            for b in t.lo..t.hi {
+                for y in g..g + h {
+                    let c = cell(a, b, y);
+                    if server.world.is_solid(c) {
+                        if weak_cells.len() < 400 && weak(server.world.material(c)) {
+                            weak_cells.push(c);
+                        }
+                    } else {
+                        server.water.add(&server.world, c, crate::water::FULL);
+                    }
+                }
+                // L'arrière de la vague retombe : il ne reste qu'une
+                // inondation peu profonde, qui s'écoule.
+                let back = a - t.sign * 18;
+                if (0..len).contains(&back) {
+                    for y in g + 2..g + t.height + 2 {
+                        server.water.remove(cell(back, b, y));
+                    }
+                }
+            }
+            a += t.sign;
+        }
+        t.last = now_front;
+        if !weak_cells.is_empty() {
+            let mid = server.world.cell_center(cell(now_front, (t.lo + t.hi) / 2, g + 2));
+            let push = if t.along_z { Vec3::Z } else { Vec3::X } * t.sign as f32 * 9.0 + Vec3::Y * 3.0;
+            destroy_cells(server, weak_cells, mid, push);
+        }
+        // Les joueurs pris dans la vague sont emportés.
+        let dir = if t.along_z { Vec3::Z } else { Vec3::X } * t.sign as f32;
+        let ids: Vec<u16> = server.clients.keys().copied().collect();
+        for id in ids {
+            let Some(c) = server.clients.get(&id) else { continue };
+            let p = server.world.world_to_cell(c.pos);
+            let (pa, pb) = if t.along_z { (p.z, p.x) } else { (p.x, p.z) };
+            let behind = (now_front - pa) * t.sign;
+            if (0..20).contains(&behind) && (t.lo..t.hi).contains(&pb) && p.y < g + h + 2 {
+                if let Some(c) = server.clients.get_mut(&id) {
+                    c.grace_until = Instant::now() + Duration::from_secs(3);
+                }
+                send(server, id, &Packet::Push { vel: dir * 2.5 + Vec3::Y * 0.8 });
+            }
+        }
+        if (0..len).contains(&now_front) {
+            server.tsunami = Some(t);
+        }
+    }
+
+    // --- Tornades ---
+    let mut list = std::mem::take(&mut server.tornadoes);
+    for t in &mut list {
+        t.life -= step;
+        // Trajectoire qui serpente, toujours dans la carte.
+        let turn = (fire_rand(server) - 0.5) * 0.6 * step;
+        t.dir = Quat::from_rotation_y(turn) * t.dir;
+        let next = t.pos + t.dir * 6.0 * step;
+        let c = server.world.world_to_cell(next);
+        if c.x < 8 || c.z < 8 || c.x > server.world.dims.x - 8 || c.z > server.world.dims.z - 8 {
+            t.dir = -t.dir;
+        } else {
+            t.pos = Vec3::new(next.x, server.world.ground_height(next.x, next.z), next.z);
+        }
+        // Arrache ce qui est fragile autour de la base.
+        let mut cells = Vec::new();
+        for _ in 0..160 {
+            let a = fire_rand(server) * std::f32::consts::TAU;
+            let r = fire_rand(server).sqrt() * t.radius;
+            let y = fire_rand(server) * 16.0;
+            let p = t.pos + Vec3::new(a.cos() * r, y, a.sin() * r);
+            let cell = server.world.world_to_cell(p);
+            if server.world.is_solid(cell) && cell.y > crate::map::GROUND - 1 {
+                let m = server.world.material(cell);
+                if (weak(m) || (fire_rand(server) < 0.04 && m != crate::world::mat::BEDROCK)) && !cells.contains(&cell) {
+                    cells.push(cell);
+                }
+            }
+        }
+        let (pos, radius) = (t.pos, t.radius);
+        if !cells.is_empty() {
+            destroy_cells(server, cells, pos, Vec3::Y * 12.0);
+        }
+        server.sim.apply_wind(pos, radius * 2.2, step);
+        // Joueurs : aspirés, soulevés, projetés.
+        let ids: Vec<u16> = server.clients.keys().copied().collect();
+        for id in ids {
+            let Some(c) = server.clients.get(&id) else { continue };
+            let d = Vec3::new(c.pos.x - pos.x, 0.0, c.pos.z - pos.z);
+            let dist = d.length();
+            if dist > radius * 2.2 || c.dead_until.is_some() || c.driving.is_some() {
+                continue;
+            }
+            let f = 1.0 - dist / (radius * 2.2);
+            let out = d / dist.max(0.3);
+            let tangent = Vec3::new(-out.z, 0.0, out.x);
+            let dv = (tangent * 16.0 - out * 6.0 + Vec3::Y * 14.0) * f * step;
+            if let Some(c) = server.clients.get_mut(&id) {
+                c.grace_until = Instant::now() + Duration::from_secs(4);
+            }
+            send(server, id, &Packet::Push { vel: dv });
+        }
+    }
+    list.retain(|t| t.life > 0.0);
+    let had = !list.is_empty() || server.tornado_timer > 0.0;
+    server.tornadoes = list;
+    if had {
+        let infos: Vec<(u32, Vec3, f32)> = server.tornadoes.iter().map(|t| (t.id, t.pos, t.radius)).collect();
+        server.tornado_timer = if infos.is_empty() { 0.0 } else { 1.0 };
+        broadcast(server, None, &Packet::Tornadoes { list: infos });
+    }
+
+    // --- Eau ---
+    if !server.water.is_empty() {
+        let s = &mut *server;
+        s.water.step(&s.world, step);
+        broadcast_water(server);
+        // L'eau éteint le feu qu'elle touche ; la pluie aussi, peu à peu.
+        let rain = server.rain;
+        let doused: Vec<IVec3> = server
+            .fire
+            .keys()
+            .copied()
+            .filter(|c| [IVec3::Y, IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z, IVec3::ZERO].iter().any(|o| server.water.level(*c + *o) > 0))
+            .collect();
+        let _ = rain;
+        if !doused.is_empty() {
+            for c in &doused {
+                server.fire.remove(c);
+            }
+            let list: Vec<[u16; 3]> = doused.iter().map(|c| [c.x as u16, c.y as u16, c.z as u16]).collect();
+            broadcast(server, None, &Packet::Fire { add: Vec::new(), remove: list });
+        }
+    }
+    if server.rain > 0.3 && !server.fire.is_empty() {
+        let chance = server.rain * 0.06 * step;
+        let doused: Vec<IVec3> = server.fire.keys().copied().filter(|_| fire_rand_free(chance)).collect();
+        if !doused.is_empty() {
+            for c in &doused {
+                server.fire.remove(c);
+            }
+            let list: Vec<[u16; 3]> = doused.iter().map(|c| [c.x as u16, c.y as u16, c.z as u16]).collect();
+            broadcast(server, None, &Packet::Fire { add: Vec::new(), remove: list });
+        }
+    }
+}
+
+/// Tirage sans état (pluie qui éteint le feu).
+fn fire_rand_free(chance: f32) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static S: AtomicU64 = AtomicU64::new(0x2545_F491_4F6C_DD1D);
+    let mut x = S.load(Ordering::Relaxed);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    S.store(x, Ordering::Relaxed);
+    ((x >> 40) as f32 / (1u64 << 24) as f32) < chance
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chat_filter_catches_disguised_words() {
+        let f = |t: &str| filter_text(t, &[]);
+        assert!(!f("espèce de connard").contains("connard"));
+        assert!(!f("c o n n a r d").contains('c'), "{}", f("c o n n a r d"));
+        assert!(f("c0nn4rd !").contains("***"));
+        assert!(f("fuuuuck").chars().all(|c| c == '*'));
+        assert_eq!(f("la classe, bien joué"), "la classe, bien joué");
+        assert_eq!(f("rejoins www.arnaque.com vite"), "rejoins [lien] vite");
+        assert_eq!(f("ARRÊTEZ DE CASSER MA MAISON"), "arrêtez de casser ma maison");
+        assert_eq!(f("pute", ), "****");
+        assert!(f("ok").eq("ok"));
+    }
+
     use super::*;
 
     fn config(dir: PathBuf, load: Option<PathBuf>) -> HostConfig {

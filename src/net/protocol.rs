@@ -19,7 +19,7 @@ pub const DEFAULT_PORT: u16 = 28431;
 pub const DISCOVERY_PORT: u16 = 28432;
 /// Version du protocole : deux versions différentes refusent de jouer
 /// ensemble (message clair plutôt que des paquets incompréhensibles).
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 /// Nombre maximal de joueurs dans une partie.
 pub const MAX_PLAYERS: usize = 16;
 
@@ -125,6 +125,14 @@ pub enum Packet {
     /// Serveur → clients : roues des véhicules `(id, centres des roues dans
     /// le repère du corps, braquage, rotation)`.
     Wheels { list: Vec<(u32, [Vec3; 4], f32, f32)> },
+    /// Serveur → clients : cellules d'eau apparues / disparues.
+    Water { add: Vec<[u16; 3]>, remove: Vec<[u16; 3]> },
+    /// Serveur → clients : météo (pluie 0..255).
+    Weather { rain: u8 },
+    /// Serveur → clients : tornades `(id, position au sol, rayon)`.
+    Tornadoes { list: Vec<(u32, Vec3, f32)> },
+    /// Serveur → client : poussée (vent, vague) à ajouter à la vitesse.
+    Push { vel: Vec3 },
     /// Serveur → client : inventaire autoritaire.
     Inv { money: u32, earned: u32, slots: Vec<[u32; 3]> },
     /// Client → serveur : recharge l'arme en main.
@@ -462,6 +470,34 @@ impl Packet {
                     }
                 }
             }
+            Packet::Water { add, remove } => {
+                w.u8(47);
+                for list in [add, remove] {
+                    w.u32(list.len() as u32);
+                    for c in list {
+                        for v in c {
+                            w.u16(*v);
+                        }
+                    }
+                }
+            }
+            Packet::Weather { rain } => {
+                w.u8(48);
+                w.u8(*rain);
+            }
+            Packet::Tornadoes { list } => {
+                w.u8(49);
+                w.u16(list.len() as u16);
+                for (id, pos, r) in list {
+                    w.u32(*id);
+                    w.vec3(*pos);
+                    w.f32(*r);
+                }
+            }
+            Packet::Push { vel } => {
+                w.u8(50);
+                w.vec3(*vel);
+            }
             Packet::Wheels { list } => {
                 w.u8(46);
                 w.u16(list.len() as u16);
@@ -748,6 +784,43 @@ impl Packet {
                 Packet::BodyPose { list }
             }
             25 => Packet::BodyRemove { id: cur.u32()? },
+            47 => {
+                let mut lists: [Vec<[u16; 3]>; 2] = [Vec::new(), Vec::new()];
+                for list in &mut lists {
+                    let n = cur.u32()? as usize;
+                    if n > 400_000 {
+                        return None;
+                    }
+                    list.reserve(n.min(65_536));
+                    for _ in 0..n {
+                        list.push([cur.u16()?, cur.u16()?, cur.u16()?]);
+                    }
+                }
+                let [add, remove] = lists;
+                Packet::Water { add, remove }
+            }
+            48 => Packet::Weather { rain: cur.u8()? },
+            49 => {
+                let n = cur.u16()?;
+                let mut list = Vec::with_capacity(n.min(64) as usize);
+                for _ in 0..n {
+                    let id = cur.u32()?;
+                    let pos = cur.vec3()?;
+                    let r = cur.f32()?;
+                    if !pos.is_finite() || !r.is_finite() {
+                        return None;
+                    }
+                    list.push((id, pos, r));
+                }
+                Packet::Tornadoes { list }
+            }
+            50 => {
+                let vel = cur.vec3()?;
+                if !vel.is_finite() {
+                    return None;
+                }
+                Packet::Push { vel: vel.clamp_length_max(60.0) }
+            }
             46 => {
                 let n = cur.u16()?;
                 let mut list = Vec::with_capacity(n.min(512) as usize);

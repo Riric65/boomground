@@ -307,6 +307,10 @@ pub struct ReceiveExtras<'w, 's> {
     density: Res<'w, crate::fx::ParticleDensity>,
     puffs: Query<'w, 's, (), With<crate::fx::Puff>>,
     wheels: ResMut<'w, crate::vehicle::WheelPoses>,
+    water: ResMut<'w, crate::water::WaterMirror>,
+    weather: ResMut<'w, crate::nature::Weather>,
+    tornadoes: ResMut<'w, crate::nature::Tornadoes>,
+    push: ResMut<'w, crate::nature::PlayerPush>,
 }
 
 /// Applique ce que le serveur a décidé.
@@ -339,6 +343,10 @@ pub fn receive(
         ref density,
         ref puffs,
         ref mut wheels,
+        ref mut water,
+        ref mut weather,
+        ref mut tornadoes,
+        ref mut push,
     } = fx_params;
     let camera_pos = camera.single().map(|c| c.translation()).unwrap_or(Vec3::ZERO);
     if !d.net.is_online() {
@@ -386,6 +394,10 @@ pub fn receive(
                 flags,
             } => {
                 d.game.multi = !lobby.solo;
+                water.cells.clear();
+                water.dirty.clear();
+                tornadoes.0.clear();
+                weather.rain = 0.0;
                 d.game.fly_allowed = flags & 1 != 0;
                 lobby.server_name = name;
                 lobby.max_players = max_players;
@@ -481,6 +493,19 @@ pub fn receive(
             Packet::BodyPose { list } => {
                 mirror.pose_bodies(&list, net_bodies);
             }
+            Packet::Water { add, remove } => {
+                let conv = |v: &[[u16; 3]]| v.iter().map(|c| IVec3::new(c[0] as i32, c[1] as i32, c[2] as i32)).collect::<Vec<_>>();
+                water.apply(&conv(&add), &conv(&remove));
+            }
+            Packet::Weather { rain } => {
+                weather.rain = rain as f32 / 255.0;
+            }
+            Packet::Tornadoes { list } => {
+                tornadoes.0 = list;
+            }
+            Packet::Push { vel } => {
+                push.0 += vel;
+            }
             Packet::Wheels { list } => {
                 for (id, centers, steer, spin) in list {
                     wheels.0.insert(id, (centers, steer, spin));
@@ -563,6 +588,10 @@ pub fn receive(
                 d.game.driving = body;
             }
             Packet::Reset { seed } => {
+                water.cells.clear();
+                water.dirty.clear();
+                tornadoes.0.clear();
+                weather.rain = 0.0;
                 d.game.seed = seed;
                 let blocks = d.world.blocks;
                 let (tx, rx) = std::sync::mpsc::channel();

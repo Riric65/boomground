@@ -32,6 +32,8 @@ pub mod vehicle;
 pub mod vitals;
 pub mod voice;
 pub mod vmesh;
+pub mod nature;
+pub mod water;
 pub mod weapon;
 pub mod world;
 
@@ -75,6 +77,10 @@ pub fn run() {
         .init_resource::<ui::Toasts>()
         .init_resource::<touch::TouchState>()
         .init_resource::<vehicle::WheelPoses>()
+        .init_resource::<water::WaterMirror>()
+        .init_resource::<nature::Weather>()
+        .init_resource::<nature::Tornadoes>()
+        .init_resource::<nature::PlayerPush>()
         .add_message::<weapon::Blast>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -219,7 +225,7 @@ pub fn run() {
                 menu::solo_pause,
                 menu::server_list_ui,
                 menu::map_size_highlight,
-                menu::solo_only,
+                (menu::solo_only, menu::host_tools),
                 window_icon.run_if(desktop),
                 touch::clear.run_if(touch::on_touch),
                 ui::soft_keyboard.run_if(touch::on_touch),
@@ -228,6 +234,7 @@ pub fn run() {
         )
         .add_systems(PostStartup, crashlog::show_last)
         .add_systems(Update, i18n::retranslate)
+        .add_systems(Update, (nature::water_meshes, nature::rain, nature::tornadoes))
         .add_systems(Update, chat::update.after(ui::text_fields))
         .add_systems(Last, (perf::detect_refresh, perf::limit).chain())
         .run();

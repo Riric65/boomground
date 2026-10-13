@@ -279,6 +279,8 @@ pub fn move_player(
     mut query: Query<(&mut Transform, &mut Body), With<Player>>,
     mut heads: Query<&mut Transform, (With<Head>, Without<Player>)>,
     mut blocks: Query<(&Transform, &mut Chunk), (Without<Player>, Without<Head>)>,
+    water: Res<crate::water::WaterMirror>,
+    mut push: ResMut<crate::nature::PlayerPush>,
 ) {
     let Ok((mut transform, mut body)) = query.single_mut() else {
         return;
@@ -368,7 +370,21 @@ pub fn move_player(
 
     let was_grounded = body.grounded;
     let fall_speed = -body.vel.y;
-    body.vel.y -= GRAVITY * dt;
+    // Poussées du serveur (tornade, vague).
+    body.vel += push.0;
+    push.0 = Vec3::ZERO;
+    // Dans l'eau : on flotte presque, on est freiné, Espace fait remonter.
+    let in_water = water.contains(world.world_to_cell(pos + Vec3::Y * 0.9));
+    if in_water {
+        body.vel.y -= GRAVITY * 0.12 * dt;
+        let k = (-2.5 * dt).exp();
+        body.vel *= k;
+        if controls && (keys.pressed(KeyCode::Space) || touch.jump) {
+            body.vel.y = (body.vel.y + 16.0 * dt).min(3.2);
+        }
+    } else {
+        body.vel.y -= GRAVITY * dt;
+    }
     let mut jumped = false;
     // Saut : barre d'espace au clavier, bouton tactile sur mobile.
     if body.grounded && controls && (keys.pressed(KeyCode::Space) || touch.jump) {
@@ -387,12 +403,35 @@ pub fn move_player(
         }
     }
 
-    // Coincé dans un voxel (régénération, gravats posés) : on remonte.
+    // Coincé dans un voxel (porte, régénération, gravats posés) : on prend
+    // la place libre la plus proche, d'abord à côté et juste au-dessus (avant
+    // on montait tout droit, jusqu'au toit s'il y avait un mur au-dessus).
     if world.overlaps(center - half, center + half) {
-        for _ in 0..40 {
-            center.y += 0.1;
-            if !world.overlaps(center - half, center + half) {
-                break;
+        let mut best: Option<(f32, Vec3)> = None;
+        for dy in 0..=6 {
+            for dx in -6..=6 {
+                for dz in -6..=6 {
+                    let off = Vec3::new(dx as f32, dy as f32, dz as f32) * 0.15;
+                    let cost = off.length_squared() + off.y * off.y;
+                    if best.is_some_and(|(b, _)| cost >= b) {
+                        continue;
+                    }
+                    let c = center + off;
+                    if !world.overlaps(c - half, c + half) {
+                        best = Some((cost, c));
+                    }
+                }
+            }
+        }
+        match best {
+            Some((_, c)) => center = c,
+            None => {
+                for _ in 0..40 {
+                    center.y += 0.1;
+                    if !world.overlaps(center - half, center + half) {
+                        break;
+                    }
+                }
             }
         }
     }
