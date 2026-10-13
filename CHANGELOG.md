@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.1
+
+- **Langue** : les valeurs des réglages ne disparaissent plus après un changement de langue.
+- **Carte** : plus de plafonniers ni de feux tricolores en l'air (test : toute la ville est
+  reliée au sol).
+- **Physique** : un morceau qui tremblote sans fin finit par se poser ; les voitures ne
+  passent plus par-dessus les poteaux (normale de contact corrigée).
+- **Feu** : brûle aussi la peinture, les toitures et le plastique.
+- **Caméra** : retour à la vue normale en sortant d'une voiture.
+
 ## 1.6.0
 
 - **Multijoueur** : plus de blocage sur « Chargement du terrain » en rejoignant un serveur

@@ -1003,10 +1003,11 @@ pub fn is_prop(material: u8) -> bool {
     matches!(material, BLUE | RED | BLACK | LAMP | FURN_WOOD | FURN_METAL)
 }
 
-/// Le matériau brûle-t-il ? (bois, feuillage, tissu)
+/// Le matériau brûle-t-il ? (bois, feuillage, tissu, peinture, toiture,
+/// plastique). Béton, brique, métal, verre et plâtre ne brûlent pas.
 pub fn flammable(material: u8) -> bool {
     use mat::*;
-    matches!(material, WOOD | FURN_WOOD | LEAVES | BLUE)
+    matches!(material, WOOD | FURN_WOOD | LEAVES | BLUE | PAINT | ROOF | RED | BLACK)
 }
 
 /// Durée de combustion d'un voxel (secondes).
@@ -1015,7 +1016,10 @@ pub fn burn_time(material: u8) -> f32 {
     match material {
         LEAVES => 3.5,
         BLUE => 4.5,
+        RED | BLACK => 5.0,
         FURN_WOOD => 6.0,
+        ROOF => 9.0,
+        PAINT => 11.0,
         _ => 8.0,
     }
 }

@@ -1413,7 +1413,12 @@ pub fn actions(
                         settings.joystick_side = (settings.joystick_side as i32 + dir as i32).rem_euclid(2) as u8
                     }
                     SettingKind::TouchSensitivity => settings.touch_sensitivity *= if dir > 0 { 1.15 } else { 1.0 / 1.15 },
-                    SettingKind::Language => settings.lang = (settings.lang as i32 + dir as i32).rem_euclid(4) as u8,
+                    SettingKind::Language => {
+                        settings.lang = (settings.lang as i32 + dir as i32).rem_euclid(4) as u8;
+                        // Tout de suite : les valeurs des réglages sont
+                        // recalculées dans la même image.
+                        crate::i18n::set(settings.lang);
+                    }
                     SettingKind::Fps => {
                         settings.fps_limit = match (settings.fps_limit <= 0.0, dir > 0) {
                             (true, true) => 0.0,

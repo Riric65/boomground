@@ -328,6 +328,9 @@ pub struct Sim {
     rng: SimRng,
     /// Corps à briser après un impact violent (traité en fin de pas).
     pending_fracture: Vec<u32>,
+    /// Point d'ancrage et durée passée autour, par corps : un corps qui
+    /// tremblote sur place sans jamais se calmer finit quand même posé.
+    drift: std::collections::HashMap<u32, (Vec3, f32)>,
 }
 
 impl Default for Sim {
@@ -344,6 +347,7 @@ impl Sim {
             next_id: 1,
             rng: SimRng(0x9E37_79B9_7F4A_7C15),
             pending_fracture: Vec::new(),
+            drift: std::collections::HashMap::new(),
         }
     }
 
@@ -726,6 +730,8 @@ impl Sim {
     }
 
     fn step_bodies(&mut self, world: &mut VoxelWorld, dt: f32, ev: &mut Vec<SimEvent>) {
+        let alive: std::collections::HashSet<u32> = self.bodies.iter().map(|b| b.id).collect();
+        self.drift.retain(|id, _| alive.contains(id));
         let mut breaks: Vec<(usize, Vec3, f32)> = Vec::new();
         let mut settle: Vec<usize> = Vec::new();
         let mut fracture_ids: Vec<u32> = Vec::new();
@@ -836,19 +842,25 @@ impl Sim {
                 if !world.is_solid(cell) {
                     continue;
                 }
-                // Normale : vers les cellules voisines vides.
+                // Normale : vers les cellules voisines vides, pondérée par le
+                // côté où se trouve le point. Sans cette pondération, un voxel
+                // isolé (poteau) avait des voisins vides opposés qui
+                // s'annulaient, et la normale par défaut « vers le haut »
+                // faisait passer la voiture par-dessus.
+                let center = world.cell_center(cell);
+                let rel = wp - center;
                 let mut n = Vec3::ZERO;
                 for o in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
                     if !world.is_solid(cell + o) {
-                        n += o.as_vec3();
+                        let dir = o.as_vec3();
+                        n += dir * (rel.dot(dir).max(0.0) + 0.02);
                     }
                 }
-                let n = if n == Vec3::ZERO {
+                let n = if n.length_squared() < 1e-8 {
                     Vec3::Y
                 } else {
                     n.normalize()
                 };
-                let center = world.cell_center(cell);
                 let depth = (VOXEL * 0.5 + (center - wp).dot(n)).clamp(0.0, VOXEL);
                 contacts.push(Contact { r, n, depth });
             }
@@ -921,6 +933,18 @@ impl Sim {
             // Un véhicule reste un corps : il ne se fige ni ne se brise seul.
             if body.rest > 0.5 && body.vehicle.is_none() {
                 settle.push(bi);
+            }
+            // Tremblement sans fin : resté dans 25 cm pendant 2 s, il se pose.
+            if body.vehicle.is_none() {
+                let d = self.drift.entry(body.id).or_insert((body.pos, 0.0));
+                if body.pos.distance(d.0) > 0.25 {
+                    *d = (body.pos, 0.0);
+                } else {
+                    d.1 += dt;
+                    if d.1 > 2.0 {
+                        settle.push(bi);
+                    }
+                }
             }
             if body.pos.y < -20.0 {
                 settle.push(bi);
@@ -1910,6 +1934,43 @@ mod tests {
             sim.blocks.len()
         );
         assert!(sim.bodies.is_empty(), "tout s'est figé en {steps} pas");
+    }
+
+    #[test]
+    fn vehicle_hits_pole_without_flying() {
+        let mut w = flat_world();
+        // Poteau fin (1 × 12) droit devant la voiture.
+        w.fill(IVec3::new(52, 6, 30), IVec3::new(53, 18, 31), mat::METAL);
+        let mut sim = Sim::new();
+        let mut cells = Vec::new();
+        for x in 50..55 {
+            for y in 6..9 {
+                for z in 50..61 {
+                    cells.push(IVec3::new(x, y, z));
+                }
+            }
+        }
+        let id = sim.form_vehicle(&w, cells).expect("véhicule");
+        let start_y = sim.body(id).unwrap().pos.y;
+        let mut ev = Vec::new();
+        let mut max_y = start_y;
+        let mut max_spin = 0.0f32;
+        for _ in 0..360 {
+            if let Some(b) = sim.body_mut(id) {
+                let v = b.vehicle.as_mut().unwrap();
+                v.throttle = 1.0;
+                v.ttl = 0.3;
+            }
+            sim.step(&mut w, 1.0 / 60.0, &mut ev);
+            if let Some(b) = sim.body(id) {
+                max_y = max_y.max(b.pos.y);
+                max_spin = max_spin.max(b.ang.length());
+            }
+        }
+        let b = sim.body(id).expect("toujours là");
+        assert!(max_y - start_y < 1.5, "la voiture ne s'envole pas : +{:.2} m", max_y - start_y);
+        assert!((b.rot * Vec3::Y).y > 0.7, "reste sur ses roues");
+        assert!(max_spin < 6.0, "pas de toupie : {max_spin:.1} rad/s");
     }
 
     #[test]

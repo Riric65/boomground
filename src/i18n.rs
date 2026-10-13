@@ -52,12 +52,16 @@ fn table() -> &'static HashMap<&'static str, [&'static str; 3]> {
 
 /// Traduit un texte français (inchangé en français ou s'il est inconnu).
 pub fn t(fr: &str) -> String {
-    let lang = current();
+    t_in(current(), fr)
+}
+
+/// Traduit dans une langue donnée.
+pub fn t_in(lang: u8, fr: &str) -> String {
     if lang == 0 {
         return fr.to_string();
     }
     match table().get(fr) {
-        Some(tr) => tr[(lang - 1) as usize].to_string(),
+        Some(tr) => tr[(lang.min(3) - 1) as usize].to_string(),
         None => fr.to_string(),
     }
 }
@@ -93,9 +97,16 @@ pub fn retranslate(
     if *last == Some(lang) {
         return;
     }
+    let before = last.unwrap_or(0);
     *last = Some(lang);
+    let shown = |l: u8, tr: &Tr| if tr.1 { t_in(l, &tr.0).to_uppercase() } else { t_in(l, &tr.0) };
     for (tr, mut text) in &mut texts {
-        let v = if tr.1 { t(&tr.0).to_uppercase() } else { t(&tr.0) };
+        // Seuls les textes qui affichent encore leur traduction d'origine :
+        // une valeur écrite par le jeu entre-temps (réglage, nom…) reste.
+        if tr.0.is_empty() || text.0 != shown(before, tr) {
+            continue;
+        }
+        let v = shown(lang, tr);
         if text.0 != v {
             text.0 = v;
         }

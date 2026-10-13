@@ -104,7 +104,19 @@ pub fn camera(
 ) {
     let _ = lobby;
     if game.driving == 0 {
-        *smooth = None;
+        // On vient de sortir : la tête reprend sa place (yeux) et le joueur
+        // regarde dans la direction de la caméra de poursuite, au lieu de
+        // garder le décalage de la caméra.
+        if smooth.take().is_some() {
+            if let (Ok((mut pt, mut body)), Ok(mut h)) = (player.single_mut(), head.single_mut()) {
+                let look = (pt.rotation * h.rotation) * Vec3::NEG_Z;
+                body.yaw = (-look.x).atan2(-look.z);
+                body.pitch = 0.0;
+                pt.rotation = Quat::from_rotation_y(body.yaw);
+                h.translation = Vec3::new(0.0, crate::player::EYE, 0.0);
+                h.rotation = Quat::IDENTITY;
+            }
+        }
         return;
     }
     let Some(entity) = mirror.body_entity(game.driving) else { return };

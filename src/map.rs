@@ -517,7 +517,10 @@ fn furnish(w: &mut VoxelWorld, rng: &mut MapRng, min: IVec3, max: IVec3, base: i
         let mut x = x0 + 2;
         while x < x1 - 2 {
             let at = IVec3::new(x, ceiling, z);
-            if free(w, at, at + IVec3::new(2, 1, 2)) {
+            // Accroché à un vrai plafond (sinon il flotte au dernier étage
+            // ou sous un toit plus bas).
+            let hung = (0..2).all(|dx| (0..2).all(|dz| w.is_solid(at + IVec3::new(dx, 1, dz))));
+            if hung && free(w, at, at + IVec3::new(2, 1, 2)) {
                 w.fill(at, at + IVec3::new(2, 1, 2), LAMP);
             }
             x += 8;
@@ -652,7 +655,12 @@ fn street_props(w: &mut VoxelWorld, rng: &mut MapRng) {
             let cz = j * BLOCK;
             let (cx, cz) = (c, cz);
             for (sx, sz) in [(-1, -1), (1, 1)] {
-                let p = IVec3::new(cx + sx * (ROAD + 1), y0, cz + sz * (ROAD + 1));
+                let mut p = IVec3::new(cx + sx * (ROAD + 1), y0, cz + sz * (ROAD + 1));
+                // Posé sur ce qu'il y a vraiment : à l'angle d'un carrefour,
+                // il n'y a pas de trottoir mais l'asphalte, plus bas.
+                while p.y > 1 && !w.is_solid(p - IVec3::Y) {
+                    p.y -= 1;
+                }
                 w.fill(p, p + IVec3::new(1, 11, 1), FURN_METAL);
                 w.fill(p + IVec3::new(0, 8, 0), p + IVec3::new(1, 11, 1), BLACK);
                 w.set(p + IVec3::new(0, 9, 0), true, LAMP);
@@ -985,6 +993,95 @@ mod tests {
             let center = Vec3::new(p.x, p.y + half.y, p.z);
             assert!(!w.overlaps(center - half, center + half), "joueur coincé : {p:?}");
         }
+    }
+
+    /// Aucune lampe ne flotte : chaque voxel lumineux est accroché à
+    /// quelque chose au-dessus (plafond ou bras de lampadaire).
+    #[test]
+    fn lamps_hang_from_something() {
+        let mut w = VoxelWorld::with_blocks(4);
+        w.rebuild(1234);
+        let lamp = |c: IVec3| w.is_solid(c) && w.material(c) == LAMP;
+        let dirs = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+        let mut seen = std::collections::HashSet::new();
+        let (mut total, mut floating) = (0, 0);
+        for x in 1..w.dims.x - 1 {
+            for y in 1..w.dims.y - 1 {
+                for z in 1..w.dims.z - 1 {
+                    let c = IVec3::new(x, y, z);
+                    if !lamp(c) || !seen.insert(c) {
+                        continue;
+                    }
+                    // Groupe de voxels lumineux : accroché s'il touche autre chose.
+                    let mut stack = vec![c];
+                    let mut held = false;
+                    let mut size = 0;
+                    while let Some(p) = stack.pop() {
+                        size += 1;
+                        for d in dirs {
+                            let n = p + d;
+                            if lamp(n) {
+                                if seen.insert(n) {
+                                    stack.push(n);
+                                }
+                            } else if w.is_solid(n) {
+                                held = true;
+                            }
+                        }
+                    }
+                    total += size;
+                    if !held {
+                        floating += size;
+                    }
+                }
+            }
+        }
+        assert!(total > 50, "lampes : {total}");
+        assert_eq!(floating, 0, "lampes en l'air : {floating} sur {total}");
+    }
+
+    /// Toute la ville générée tient au sol : aucun bloc isolé en l'air.
+    #[test]
+    fn city_is_connected_to_ground() {
+        let mut w = VoxelWorld::with_blocks(4);
+        w.rebuild(1234);
+        let d = w.dims;
+        let idx = |c: IVec3| ((c.y * d.z + c.z) * d.x + c.x) as usize;
+        let mut reached = vec![false; (d.x * d.y * d.z) as usize];
+        let mut stack = Vec::new();
+        for x in 0..d.x {
+            for z in 0..d.z {
+                let c = IVec3::new(x, 0, z);
+                if w.is_solid(c) {
+                    reached[idx(c)] = true;
+                    stack.push(c);
+                }
+            }
+        }
+        let dirs = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+        while let Some(p) = stack.pop() {
+            for o in dirs {
+                let n = p + o;
+                if n.cmpge(IVec3::ZERO).all() && n.cmplt(d).all() && !reached[idx(n)] && w.is_solid(n) {
+                    reached[idx(n)] = true;
+                    stack.push(n);
+                }
+            }
+        }
+        let mut lost: std::collections::BTreeMap<u8, usize> = Default::default();
+        let mut example = None;
+        for y in 0..d.y {
+            for z in 0..d.z {
+                for x in 0..d.x {
+                    let c = IVec3::new(x, y, z);
+                    if w.is_solid(c) && !reached[idx(c)] {
+                        *lost.entry(w.material(c)).or_default() += 1;
+                        example.get_or_insert(c);
+                    }
+                }
+            }
+        }
+        assert!(lost.is_empty(), "blocs en l'air (matériau → nombre) : {lost:?}, ex. {example:?}");
     }
 
     /// Deux joueurs ne doivent pas réapparaître au même endroit.
